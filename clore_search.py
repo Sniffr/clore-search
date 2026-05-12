@@ -241,6 +241,12 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             continue
 
         price_info = server.get("price", {})
+
+        # Extract real USD prices from USD-Blockchain field (the actual dollar amount)
+        od_usd = price_info.get("on_demand", {}).get("USD-Blockchain", 0)
+        spot_usd = price_info.get("spot", {}).get("USD-Blockchain", 0)
+
+        # Also get BTC prices for reference
         on_demand_btc = price_info.get("on_demand", {}).get("bitcoin", 0)
         spot_btc = price_info.get("spot", {}).get("bitcoin", 0)
 
@@ -272,6 +278,8 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             "id": server.get("id"),
             "gpu": gpu_name,
             "vram": gpuram,
+            "on_demand_usd": od_usd,
+            "spot_usd": spot_usd,
             "on_demand_btc": on_demand_btc,
             "spot_btc": spot_btc,
             "cpu": specs.get("cpu", "N/A"),
@@ -285,8 +293,8 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             "reliability": server.get("reliability", 0),
         })
 
-    # Sort by cheapest on-demand price first
-    results.sort(key=lambda x: x["on_demand_btc"])
+    # Sort by cheapest on-demand USD price first
+    results.sort(key=lambda x: x["on_demand_usd"])
     return results
 
 
@@ -305,10 +313,8 @@ def print_server_table(servers: list):
 
     for i, s in enumerate(servers, 1):
         gpu_display = s["gpu"][:26] + ".." if len(s["gpu"]) > 28 else s["gpu"]
-        od_btc = s['on_demand_btc']
-        sp_btc = s['spot_btc']
-        od_usd = btc_to_usd(od_btc)
-        sp_usd = btc_to_usd(sp_btc)
+        od_usd = s['on_demand_usd']
+        sp_usd = s['spot_usd']
         rel = f"{s['reliability']*100:.0f}%" if s.get('reliability') else "N/A"
         allowed = ", ".join(s['allowed_coins'])[:23] + ".." if len(", ".join(s['allowed_coins'])) > 25 else ", ".join(s['allowed_coins'])
         net_up = f"{s['net_up']:.0f}"
