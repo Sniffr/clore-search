@@ -85,9 +85,9 @@ fi
 
 echo "[$(date)] Download complete ($FILESIZE bytes)" >> /var/log/startup.log
 
-# Also persist onstart.sh for Clore.ai platform compatibility
+# Also persist onstart for Clore.ai platform compatibility (use .txt extension as .sh is rejected)
 mkdir -p /root
-cat > /root/onstart.sh << 'ONSTART'
+cat > /root/onstart.txt << 'ONSTART'
 #!/bin/sh
 export LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
 /app/llama-server \
@@ -102,8 +102,8 @@ export LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
   --no-mmap \
   --jinja >> /var/log/llama-server.log 2>&1
 ONSTART
-chmod +x /root/onstart.sh
-echo "[$(date)] onstart.sh written ($(wc -c < /root/onstart.sh) bytes)" >> /var/log/startup.log
+chmod +x /root/onstart.txt
+echo "[$(date)] onstart.txt written ($(wc -c < /root/onstart.txt) bytes)" >> /var/log/startup.log
 
 # Launch llama-server in the background (so startup script can exit cleanly)
 echo "[$(date)] Starting llama-server..." >> /var/log/startup.log
