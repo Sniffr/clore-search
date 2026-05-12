@@ -42,31 +42,35 @@ DEFAULT_CURRENCY = "USD-Blockchain"
 DEFAULT_MIN_BANDWIDTH = 50  # Mbps, both up and down
 
 DEFAULT_STARTUP_SCRIPT = """#!/bin/sh
+set -e
 mkdir -p /models
 MODEL="/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 URL="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 export HF_TOKEN="hf_your_token_here"
 
+echo "[$(date)] Starting startup script..." >> /var/log/startup.log
+
+# Download model if not present
 if [ ! -f "$MODEL" ]; then
     echo "[$(date)] Starting model download..." >> /var/log/startup.log
 
     # Try 1: aria2c (multi-connection, fastest that actually works)
     echo "[$(date)] Trying aria2c..." >> /var/log/startup.log
-    aria2c -x 16 -s 16 -k 1M -d /models -o Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \\
-        --header="Authorization: Bearer $HF_TOKEN" \\
+    aria2c -x 16 -s 16 -k 1M -d /models -o Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+        --header="Authorization: Bearer $HF_TOKEN" \
         "$URL" >> /var/log/startup.log 2>&1
 
     # Try 2: wget
     if [ ! -f "$MODEL" ]; then
         echo "[$(date)] aria2c failed, trying wget..." >> /var/log/startup.log
-        wget --header="Authorization: Bearer $HF_TOKEN" \\
+        wget --header="Authorization: Bearer $HF_TOKEN" \
             -O "$MODEL" "$URL" >> /var/log/startup.log 2>&1
     fi
 
     # Try 3: curl
     if [ ! -f "$MODEL" ]; then
         echo "[$(date)] wget failed, trying curl..." >> /var/log/startup.log
-        curl -L -H "Authorization: Bearer $HF_TOKEN" \\
+        curl -L -H "Authorization: Bearer $HF_TOKEN" \
             -o "$MODEL" "$URL" >> /var/log/startup.log 2>&1
     fi
 fi
@@ -81,24 +85,42 @@ fi
 
 echo "[$(date)] Download complete ($FILESIZE bytes)" >> /var/log/startup.log
 
-cat > /root/onstart.sh << 'EOF'
+# Also persist onstart.sh for Clore.ai platform compatibility
+mkdir -p /root
+cat > /root/onstart.sh << 'ONSTART'
 #!/bin/sh
 export LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
-/app/llama-server \\
-  -m /models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \\
-  --host 0.0.0.0 \\
-  --port 8080 \\
-  -ngl 999 \\
-  -fa on \\
-  -c 65536 \\
-  --cache-type-k q8_0 \\
-  --cache-type-v q8_0 \\
-  --no-mmap \\
+/app/llama-server \
+  -m /models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+  --host 0.0.0.0 \
+  --port 8080 \
+  -ngl 999 \
+  -fa on \
+  -c 65536 \
+  --cache-type-k q8_0 \
+  --cache-type-v q8_0 \
+  --no-mmap \
   --jinja >> /var/log/llama-server.log 2>&1
-EOF
-
+ONSTART
 chmod +x /root/onstart.sh
-s6-svc -r /var/run/s6/services/onstart
+echo "[$(date)] onstart.sh written ($(wc -c < /root/onstart.sh) bytes)" >> /var/log/startup.log
+
+# Launch llama-server in the background (so startup script can exit cleanly)
+echo "[$(date)] Starting llama-server..." >> /var/log/startup.log
+nohup /app/llama-server \
+  -m /models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+  --host 0.0.0.0 \
+  --port 8080 \
+  -ngl 999 \
+  -fa on \
+  -c 65536 \
+  --cache-type-k q8_0 \
+  --cache-type-v q8_0 \
+  --no-mmap \
+  --jinja >> /var/log/llama-server.log 2>&1 &
+
+echo "[$(date)] llama-server launched (PID: $!) on port 8080" >> /var/log/startup.log
+echo "[$(date)] Startup script complete!" >> /var/log/startup.log
 """
 
 
