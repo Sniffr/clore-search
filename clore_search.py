@@ -213,6 +213,7 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
         min_bandwidth_mbps: Minimum network bandwidth (both up and down) in Mbps.
     """
     results = []
+    btc_usd = get_btc_usd_price()
 
     for server in servers:
         specs = server.get("specs", {})
@@ -232,14 +233,6 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             continue
 
         price_info = server.get("price", {})
-
-        # Extract real USD prices from USD-Blockchain field (the actual dollar amount)
-        od_usd = price_info.get("on_demand", {}).get("USD-Blockchain", 0)
-        spot_usd = price_info.get("spot", {}).get("USD-Blockchain", 0)
-
-        # Also get BTC prices for reference
-        on_demand_btc = price_info.get("on_demand", {}).get("bitcoin", 0)
-        spot_btc = price_info.get("spot", {}).get("bitcoin", 0)
 
         # Check allowed coins (the actual field name on the API)
         allowed = server.get("allowed_coins", [])
@@ -263,6 +256,21 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
         if currency and currency not in allowed:
             continue
 
+        # Extract USD prices — prefer USD-Blockchain, fall back to BTC*rate
+        od_btc = price_info.get("on_demand", {}).get("bitcoin", 0)
+        spot_btc = price_info.get("spot", {}).get("bitcoin", 0)
+
+        od_usd_raw = price_info.get("on_demand", {}).get("USD-Blockchain", 0)
+        spot_usd_raw = price_info.get("spot", {}).get("USD-Blockchain", 0)
+
+        # If USD-Blockchain price is 0 but BTC is available, convert BTC->USD
+        od_usd = od_usd_raw if od_usd_raw > 0 else btc_to_usd(od_btc) if od_btc > 0 else 0
+        spot_usd = spot_usd_raw if spot_usd_raw > 0 else btc_to_usd(spot_btc) if spot_btc > 0 else 0
+
+        # Also get CLORE prices
+        od_clore = price_info.get("on_demand", {}).get("CLORE-Blockchain", 0)
+        spot_clore = price_info.get("spot", {}).get("CLORE-Blockchain", 0)
+
         cc = net.get("cc", "N/A")  # country code
 
         results.append({
@@ -271,8 +279,10 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             "vram": gpuram,
             "on_demand_usd": od_usd,
             "spot_usd": spot_usd,
-            "on_demand_btc": on_demand_btc,
+            "on_demand_btc": od_btc,
             "spot_btc": spot_btc,
+            "on_demand_clore": od_clore,
+            "spot_clore": spot_clore,
             "cpu": specs.get("cpu", "N/A"),
             "ram": specs.get("ram", "N/A"),
             "disk": specs.get("disk", "N/A"),
@@ -290,38 +300,61 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
 
 
 def print_server_table(servers: list):
-    """Print a formatted table of GPU servers."""
+    """Print a formatted table of GPU servers with multi-currency pricing."""
+    btc_usd = get_btc_usd_price()
     if not servers:
-        print("\n🔍 No servers found with >{}GB VRAM, >{}Mbps bandwidth.".format(20, 50))
+        print(f"\n🔍 No servers found with >20GB VRAM, >50Mbps bandwidth.")
+        print(f"   (BTC/USD rate: ${btc_usd:.2f})")
         return
 
-    print("\n" + "=" * 170)
+    print("\n" + "=" * 180)
     print(f"  Found {len(servers)} available GPU server(s) with >20GB VRAM, >50Mbps bandwidth")
-    print("=" * 170)
-    print(f"  {'#':<4} {'ID':<7} {'GPU':<28} {'VRAM':<7} {'Up':<7} {'Down':<7} {'Rel':<5} {'Loc':<4} "
-          f"{'Allowed':<25} {'On-Demand $':<14} {'Spot $':<14}")
-    print("-" * 170)
+    print(f"  BTC/USD rate: ${btc_usd:,.2f}")
+    print("=" * 180)
+    print(f"  {'#':<4} {'ID':<7} {'GPU':<28} {'VRAM':<5} {'Up':<7} {'Down':<7} {'Rel':<5} {'Loc':<4} "
+          f"{'Allowed':<20} {'$ OD':<8} {'$ Spot':<8} {'BTC OD':<10} {'BTC Spot':<10} {'CLORE OD':<10} {'CLORE Spot':<10}")
+    print("-" * 180)
 
     for i, s in enumerate(servers, 1):
         gpu_display = s["gpu"][:26] + ".." if len(s["gpu"]) > 28 else s["gpu"]
         od_usd = s['on_demand_usd']
         sp_usd = s['spot_usd']
+        od_btc = s['on_demand_btc']
+        sp_btc = s['spot_btc']
+        od_clore = s.get('on_demand_clore', 0)
+        sp_clore = s.get('spot_clore', 0)
         rel = f"{s['reliability']*100:.0f}%" if s.get('reliability') else "N/A"
-        allowed = ", ".join(s['allowed_coins'])[:23] + ".." if len(", ".join(s['allowed_coins'])) > 25 else ", ".join(s['allowed_coins'])
+        allowed = ", ".join(s['allowed_coins'])[:18] + ".." if len(", ".join(s['allowed_coins'])) > 20 else ", ".join(s['allowed_coins'])
         net_up = f"{s['net_up']:.0f}"
         net_down = f"{s['net_down']:.0f}"
         cc = s.get('net_cc', '??')
-        print(f"  {i:<4} {s['id']:<7} {gpu_display:<28} {s['vram']:<7}GB "
-              f"{net_up:<7}Mbps {net_down:<7}Mbps "
-              f"{rel:<5} {cc:<4} {allowed:<25} "
-              f"${od_usd:<13.2f} ${sp_usd:<13.2f}")
 
-    print("-" * 170)
-    print(f"  * Prices are per day in USD. 'on_demand' = guaranteed uptime.")
-    print(f"  * 'spot' = cheaper but can be outbid.")
+        # Format BTC values (they're per-day, often very small numbers like 1.364e-05)
+        def fmt_btc(v):
+            if v >= 0.001:
+                return f"{v:.5f}"
+            elif v >= 0.0001:
+                return f"{v:.6f}"
+            elif v >= 0.00001:
+                return f"{v:.7f}"
+            else:
+                return f"{v:.8f}"
+
+        print(f"  {i:<4} {s['id']:<7} {gpu_display:<28} {s['vram']:<5}GB "
+              f"{net_up:<7}Mbps {net_down:<7}Mbps "
+              f"{rel:<5} {cc:<4} {allowed:<20} "
+              f"${od_usd:<7.2f} ${sp_usd:<7.2f} "
+              f"{fmt_btc(od_btc):<10} {fmt_btc(sp_btc):<10} "
+              f"{fmt_btc(od_clore):<10} {fmt_btc(sp_clore):<10}")
+
+    print("-" * 180)
+    print(f"  * Prices are per day. '$' = USD, 'BTC' = Bitcoin (per day), 'CLORE' = CLORE tokens (per day).")
+    print(f"  * '$ OD/Spot' = on-demand/guaranteed / spot (cheaper, can be outbid) in USD.")
+    print(f"  * 'BTC OD/Spot' = on-demand/guaranteed / spot in BTC (converted at ${btc_usd:,.0f}/BTC).")
     print(f"  * 'Rel' = host reliability. 'Loc' = server country code.")
     print(f"  * 'Up/Down' = measured bandwidth in Mbps (both must exceed 50Mbps).")
-    print("=" * 170)
+    print(f"  * All servers accept at least one currency: bitcoin, USD-Blockchain, CLORE-Blockchain.")
+    print("=" * 180)
 
 
 def rent_server(client: CloreClient, server_id: int, order_type: str = "on-demand",
@@ -433,8 +466,8 @@ def main():
         print("\nActions:")
         print("  search [min_vram] [--currency bitcoin|CLORE-Blockchain|USD-Blockchain]")
         print("                       [--min-bandwidth 50]  - Search marketplace for GPU servers")
-        print("  rent <server_id> [on-demand|spot]")
-        print("                       type: on-demand|spot (default: on-demand)")
+        print("  rent <server_id> <on-demand|spot> [--currency USD-Blockchain|bitcoin|CLORE-Blockchain]")
+        print("                       [--spot-price X]  - Rent a server (choose currency)")
         print("  orders             - Show your current orders")
         print("  wallets            - Show wallet balances")
         print("\nDefault config:")
@@ -499,14 +532,39 @@ def main():
     elif action == "rent":
         if len(sys.argv) < 3:
             print("❌ Please specify server ID and type")
-            print("   Example: python clore_search.py rent 103669 on-demand")
+            print("   Example: python clore_search.py rent 103669 on-demand --currency USD-Blockchain")
             sys.exit(1)
         server_id = int(sys.argv[2])
-        order_type = sys.argv[3] if len(sys.argv) > 3 else "on-demand"
-        if order_type not in ("on-demand", "spot"):
-            print("❌ Order type must be 'on-demand' or 'spot'")
-            sys.exit(1)
-        rent_server(client, server_id, order_type)
+        order_type = "on-demand"
+        currency = DEFAULT_CURRENCY
+        spot_price = None
+        i = 3
+        while i < len(sys.argv):
+            arg = sys.argv[i]
+            if arg in ("on-demand", "spot"):
+                order_type = arg
+            elif arg == "--currency":
+                if i + 1 < len(sys.argv):
+                    currency = sys.argv[i + 1]
+                    if currency not in ("bitcoin", "CLORE-Blockchain", "USD-Blockchain"):
+                        print(f"❌ Invalid currency '{currency}'. Must be bitcoin, CLORE-Blockchain, or USD-Blockchain")
+                        sys.exit(1)
+                    i += 1
+                else:
+                    print("❌ --currency requires a value")
+                    sys.exit(1)
+            elif arg == "--spot-price":
+                if i + 1 < len(sys.argv):
+                    spot_price = float(sys.argv[i + 1])
+                    i += 1
+                else:
+                    print("❌ --spot-price requires a numeric value")
+                    sys.exit(1)
+            else:
+                print(f"❌ Unknown rent argument: {arg}")
+                sys.exit(1)
+            i += 1
+        rent_server(client, server_id, order_type, currency=currency, spot_price=spot_price)
 
     elif action == "orders":
         show_orders(client)
