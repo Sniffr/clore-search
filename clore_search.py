@@ -143,22 +143,13 @@ class CloreClient:
                      ports: dict = None, ssh_password: str = None,
                      currency: str = DEFAULT_CURRENCY, order_type: str = "on-demand",
                      spot_price: float = None, env: dict = None,
-                     entrypoint: str = DEFAULT_ENTRYPOINT,
-                     startup_script: str = None) -> dict:
+                     autossh_entrypoint: str = DEFAULT_ENTRYPOINT,
+                     command: str = None) -> dict:
         """Create a rental order for a server.
 
-        Args:
-            server_id: The marketplace server ID to rent.
-            image: Docker image — defaults to archer304/llama.cpp:server-cuda.
-            ports: Port mapping dict, e.g. {"22": "tcp", "5000": "tcp", "8080": "http"}.
-            ssh_password: SSH password (auto-generated if not provided).
-            currency: "bitcoin", "CLORE-Blockchain", or "USD-Blockchain".
-            order_type: "on-demand" or "spot".
-            spot_price: Required for spot orders — your bid in the currency unit.
-            env: Optional environment variables dict.
-            entrypoint: Container entrypoint — defaults to "ssh_autoinstall".
-            startup_script: Shell script to run on container startup (downloads model,
-                           configures llama-server, etc.).
+        Uses official Clore.ai API parameter names:
+        - autossh_entrypoint (not 'entrypoint')
+        - command (not 'startup_script')
         """
         payload = {
             "renting_server": server_id,
@@ -167,10 +158,10 @@ class CloreClient:
             "image": image,
             "ports": ports or DEFAULT_PORTS,
             "ssh_password": ssh_password or DEFAULT_SSH_PASSWORD,
-            "entrypoint": entrypoint or DEFAULT_ENTRYPOINT,
+            "autossh_entrypoint": autossh_entrypoint or DEFAULT_ENTRYPOINT,
         }
-        if startup_script:
-            payload["startup_script"] = startup_script
+        if command:
+            payload["command"] = command
         if env:
             payload["env"] = env
         if order_type == "spot" and spot_price:
@@ -337,32 +328,23 @@ def rent_server(client: CloreClient, server_id: int, order_type: str = "on-deman
                 image: str = DEFAULT_IMAGE, currency: str = DEFAULT_CURRENCY,
                 ssh_password: str = DEFAULT_SSH_PASSWORD,
                 ports: dict = DEFAULT_PORTS,
-                entrypoint: str = DEFAULT_ENTRYPOINT,
-                startup_script: str = DEFAULT_STARTUP_SCRIPT,
+                autossh_entrypoint: str = DEFAULT_ENTRYPOINT,
+                command: str = DEFAULT_STARTUP_SCRIPT,
                 spot_price: float = None, env: dict = None):
     """Rent a server with llama.cpp + Qwen3.6-35B-A3B configuration.
 
-    Args:
-        client: CloreClient instance.
-        server_id: Server ID from marketplace.
-        order_type: "on-demand" or "spot".
-        image: Docker image (defaults to archer304/llama.cpp:server-cuda).
-        currency: Payment currency (defaults to USD-Blockchain).
-        ssh_password: SSH password (defaults to preset).
-        ports: Port mappings (defaults to 22/tcp, 5000/tcp, 8080/http).
-        entrypoint: Container entrypoint (defaults to ssh_autoinstall).
-        startup_script: Startup script (defaults to model downloader + llama-server).
-        spot_price: Your bid for spot orders.
-        env: Environment variables to inject.
+    Uses official Clore.ai API parameter names:
+    - autossh_entrypoint (triggers SSH auto-install on the host)
+    - command (startup script for model download + llama-server)
     """
     print(f"\n🔒 Preparing to rent server #{server_id} ({order_type})...")
     print(f"  🖼️  Docker image: {image}")
-    print(f"  🔑 Entrypoint: {entrypoint}")
+    print(f"  🔑 Entrypoint: {autossh_entrypoint}")
     print(f"  🌐 Ports: {ports}")
     print(f"  💰 Currency: {currency}")
     print(f"  🔑 SSH password: {ssh_password[:4]}... (custom)")
-    if startup_script:
-        lines = startup_script.strip().split('\n')
+    if command:
+        lines = command.strip().split('\n')
         print(f"  📜 Startup script: {len(lines)} lines (model downloader + llama-server)")
     if order_type == "spot":
         print(f"  💸 Spot bid: {spot_price} {currency}/day")
@@ -377,8 +359,8 @@ def rent_server(client: CloreClient, server_id: int, order_type: str = "on-deman
         order_type=order_type,
         spot_price=spot_price,
         env=env,
-        entrypoint=entrypoint,
-        startup_script=startup_script,
+        autossh_entrypoint=autossh_entrypoint,
+        command=command,
     )
 
     if result.get("code") == 0:
@@ -500,47 +482,31 @@ def main():
                     min_bandwidth = int(sys.argv[i + 1])
                     i += 1
                 else:
-                    print("❌ --min-bandwidth requires a numeric value (Mbps)")
+                    print("❌ --min-bandwidth requires a numeric value")
                     sys.exit(1)
-            elif arg.isdigit():
-                min_vram = int(arg)
+            else:
+                try:
+                    min_vram = int(arg)
+                except ValueError:
+                    print(f"❌ Invalid argument: {arg}")
+                    sys.exit(1)
             i += 1
 
-        print(f"\n🔍 Searching Clore.ai marketplace for GPUs with >{min_vram}GB VRAM, "
-              f">{min_bandwidth}Mbps bandwidth"
-              f"{f' ({currency_filter})' if currency_filter else ''}...")
-
         servers = client.get_marketplace()
-        filtered = filter_gpu_servers(servers, min_vram, currency=currency_filter,
-                                       min_bandwidth_mbps=min_bandwidth)
+        filtered = filter_gpu_servers(servers, min_vram, currency_filter, min_bandwidth)
         print_server_table(filtered)
-
-        if not filtered:
-            print("\n💡 Tip: Try lowering the VRAM threshold, bandwidth requirement, or check back later.")
-            return
 
     elif action == "rent":
         if len(sys.argv) < 3:
-            print("❌ Usage: python clore_search.py rent <server_id> [on-demand|spot]")
+            print("❌ Please specify server ID and type")
+            print("   Example: python clore_search.py rent 103669 on-demand")
             sys.exit(1)
-
         server_id = int(sys.argv[2])
         order_type = sys.argv[3] if len(sys.argv) > 3 else "on-demand"
-
         if order_type not in ("on-demand", "spot"):
             print("❌ Order type must be 'on-demand' or 'spot'")
             sys.exit(1)
-
-        # For spot, calculate a default bid at 90% of the listed spot price
-        spot_price = None
-        if order_type == "spot":
-            spot_price = 0.000001  # minimum bid
-
-        rent_server(
-            client=client,
-            server_id=server_id,
-            order_type=order_type,
-        )
+        rent_server(client, server_id, order_type)
 
     elif action == "orders":
         show_orders(client)
