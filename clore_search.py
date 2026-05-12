@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Clore.ai GPU Marketplace Searcher
-Searches for cheapest GPU servers with >20GB VRAM and optionally rents them.
+Searches for cheapest GPU servers with >20GB VRAM and >50Mbps bandwidth,
+and optionally rents them.
 """
 
 import os
@@ -38,6 +39,7 @@ DEFAULT_PORTS = {"22": "tcp", "5000": "tcp", "8080": "http"}
 DEFAULT_SSH_PASSWORD = "DRpjRuu88XtvWYHnNXcB5Ksx"
 DEFAULT_ENTRYPOINT = "ssh_autoinstall"
 DEFAULT_CURRENCY = "USD-Blockchain"
+DEFAULT_MIN_BANDWIDTH = 50  # Mbps, both up and down
 
 DEFAULT_STARTUP_SCRIPT = """#!/bin/sh
 mkdir -p /models
@@ -207,14 +209,17 @@ def extract_gpu_info(specs: dict) -> tuple:
     return clean, gpuram
 
 
-def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = None) -> list:
-    """Filter servers with GPU VRAM > min_vram_gb and not currently rented.
+def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = None,
+                       min_bandwidth_mbps: int = 50) -> list:
+    """Filter servers with GPU VRAM > min_vram_gb, bandwidth > min_bandwidth_mbps,
+    and not currently rented.
 
     Args:
         servers: Raw marketplace server list.
         min_vram_gb: Minimum GPU VRAM in GB (exclusive).
         currency: Optional currency filter — 'bitcoin', 'CLORE-Blockchain', 'USD-Blockchain'.
                   If None, shows all servers that accept at least one currency.
+        min_bandwidth_mbps: Minimum network bandwidth (both up and down) in Mbps.
     """
     results = []
 
@@ -226,6 +231,13 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             continue
 
         if server.get("rented", True):
+            continue
+
+        # Check bandwidth (specs.net.up and specs.net.down in Mbps)
+        net = specs.get("net", {})
+        up_speed = net.get("up", 0)
+        down_speed = net.get("down", 0)
+        if up_speed < min_bandwidth_mbps or down_speed < min_bandwidth_mbps:
             continue
 
         price_info = server.get("price", {})
@@ -254,6 +266,8 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
         if currency and currency not in allowed:
             continue
 
+        cc = net.get("cc", "N/A")  # country code
+
         results.append({
             "id": server.get("id"),
             "gpu": gpu_name,
@@ -263,7 +277,9 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             "cpu": specs.get("cpu", "N/A"),
             "ram": specs.get("ram", "N/A"),
             "disk": specs.get("disk", "N/A"),
-            "net": specs.get("net", {}),
+            "net_up": up_speed,
+            "net_down": down_speed,
+            "net_cc": cc,
             "mrl": server.get("mrl", "N/A"),
             "allowed_coins": allowed,
             "reliability": server.get("reliability", 0),
@@ -277,35 +293,38 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
 def print_server_table(servers: list):
     """Print a formatted table of GPU servers."""
     if not servers:
-        print("\n🔍 No servers found with >{}GB VRAM.".format(20))
+        print("\n🔍 No servers found with >{}GB VRAM, >{}Mbps bandwidth.".format(20, 50))
         return
 
-    print("\n" + "=" * 140)
-    print(f"  Found {len(servers)} available GPU server(s) with >20GB VRAM")
-    print("=" * 140)
-    print(f"  {'#':<4} {'ID':<7} {'GPU':<30} {'VRAM':<7} {'Rel':<5} {'Allowed':<25} "
-          f"{'On-Demand BTC':<14} {'On-Demand $':<14} "
-          f"{'Spot BTC':<14} {'Spot $':<14}")
-    print("-" * 140)
+    print("\n" + "=" * 170)
+    print(f"  Found {len(servers)} available GPU server(s) with >20GB VRAM, >50Mbps bandwidth")
+    print("=" * 170)
+    print(f"  {'#':<4} {'ID':<7} {'GPU':<28} {'VRAM':<7} {'Up':<7} {'Down':<7} {'Rel':<5} {'Loc':<4} "
+          f"{'Allowed':<25} {'On-Demand $':<14} {'Spot $':<14}")
+    print("-" * 170)
 
     for i, s in enumerate(servers, 1):
-        gpu_display = s["gpu"][:28] + ".." if len(s["gpu"]) > 30 else s["gpu"]
+        gpu_display = s["gpu"][:26] + ".." if len(s["gpu"]) > 28 else s["gpu"]
         od_btc = s['on_demand_btc']
         sp_btc = s['spot_btc']
         od_usd = btc_to_usd(od_btc)
         sp_usd = btc_to_usd(sp_btc)
         rel = f"{s['reliability']*100:.0f}%" if s.get('reliability') else "N/A"
         allowed = ", ".join(s['allowed_coins'])[:23] + ".." if len(", ".join(s['allowed_coins'])) > 25 else ", ".join(s['allowed_coins'])
-        print(f"  {i:<4} {s['id']:<7} {gpu_display:<30} {s['vram']:<7}GB "
-              f"{rel:<5} {allowed:<25} "
-              f"{od_btc:<14.8f} ${od_usd:<13.2f} "
-              f"{sp_btc:<14.8f} ${sp_usd:<13.2f}")
+        net_up = f"{s['net_up']:.0f}"
+        net_down = f"{s['net_down']:.0f}"
+        cc = s.get('net_cc', '??')
+        print(f"  {i:<4} {s['id']:<7} {gpu_display:<28} {s['vram']:<7}GB "
+              f"{net_up:<7}Mbps {net_down:<7}Mbps "
+              f"{rel:<5} {cc:<4} {allowed:<25} "
+              f"${od_usd:<13.2f} ${sp_usd:<13.2f}")
 
-    print("-" * 140)
-    print(f"  * Prices are per day in BTC. 'on_demand' = guaranteed uptime.")
+    print("-" * 170)
+    print(f"  * Prices are per day in USD. 'on_demand' = guaranteed uptime.")
     print(f"  * 'spot' = cheaper but can be outbid.")
-    print(f"  * 'Rel' = host reliability score. 'Allowed' = accepted payment currencies.")
-    print("=" * 140)
+    print(f"  * 'Rel' = host reliability. 'Loc' = server country code.")
+    print(f"  * 'Up/Down' = measured bandwidth in Mbps (both must exceed 50Mbps).")
+    print("=" * 170)
 
 
 def rent_server(client: CloreClient, server_id: int, order_type: str = "on-demand",
@@ -425,7 +444,7 @@ def main():
         print("Usage: python clore_search.py <action> [args]")
         print("\nActions:")
         print("  search [min_vram] [--currency bitcoin|CLORE-Blockchain|USD-Blockchain]")
-        print("                       - Search marketplace for GPU servers")
+        print("                       [--min-bandwidth 50]  - Search marketplace for GPU servers")
         print("  rent <server_id> [on-demand|spot]")
         print("                       type: on-demand|spot (default: on-demand)")
         print("  orders             - Show your current orders")
@@ -437,6 +456,7 @@ def main():
         print(f"  Entrypoint: {DEFAULT_ENTRYPOINT}")
         print(f"  Currency:   {DEFAULT_CURRENCY}")
         print(f"  Startup:    Model downloader + llama-server (Qwen3.6-35B-A3B)")
+        print(f"  Bandwidth:  >= {DEFAULT_MIN_BANDWIDTH} Mbps (both up & down)")
         print("\nSet API key via CLORE_API_KEY env var.")
         sys.exit(1)
 
@@ -455,6 +475,7 @@ def main():
     if action == "search":
         min_vram = 20
         currency_filter = None
+        min_bandwidth = DEFAULT_MIN_BANDWIDTH
         i = 2
         while i < len(sys.argv):
             arg = sys.argv[i]
@@ -468,19 +489,28 @@ def main():
                 else:
                     print("❌ --currency requires a value")
                     sys.exit(1)
+            elif arg == "--min-bandwidth":
+                if i + 1 < len(sys.argv) and sys.argv[i + 1].isdigit():
+                    min_bandwidth = int(sys.argv[i + 1])
+                    i += 1
+                else:
+                    print("❌ --min-bandwidth requires a numeric value (Mbps)")
+                    sys.exit(1)
             elif arg.isdigit():
                 min_vram = int(arg)
             i += 1
 
-        print(f"\n🔍 Searching Clore.ai marketplace for GPUs with >{min_vram}GB VRAM"
+        print(f"\n🔍 Searching Clore.ai marketplace for GPUs with >{min_vram}GB VRAM, "
+              f">{min_bandwidth}Mbps bandwidth"
               f"{f' ({currency_filter})' if currency_filter else ''}...")
 
         servers = client.get_marketplace()
-        filtered = filter_gpu_servers(servers, min_vram, currency=currency_filter)
+        filtered = filter_gpu_servers(servers, min_vram, currency=currency_filter,
+                                       min_bandwidth_mbps=min_bandwidth)
         print_server_table(filtered)
 
         if not filtered:
-            print("\n💡 Tip: Try lowering the VRAM threshold or check back later.")
+            print("\n💡 Tip: Try lowering the VRAM threshold, bandwidth requirement, or check back later.")
             return
 
     elif action == "rent":
