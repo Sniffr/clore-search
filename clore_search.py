@@ -121,7 +121,7 @@ export LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
   --port 8080 \
   -ngl 999 \
   -fa on \
-  -c 120500 \
+  -c 240500 \
   --cache-type-k q8_0 \
   --cache-type-v q8_0 \
   --no-mmap \
@@ -445,6 +445,7 @@ def find_best_price_for_server(servers: list, server_id: int,
         if server.get("id") != server_id:
             continue
         price_info = server.get("price", {})
+        allowed = server.get("allowed_coins", [])
 
         od_usd_raw = price_info.get("on_demand", {}).get("USD-Blockchain", 0)
         sp_usd_raw = price_info.get("spot", {}).get("USD-Blockchain", 0)
@@ -465,6 +466,7 @@ def find_best_price_for_server(servers: list, server_id: int,
         candidates = [
             (ot, cur, nat, usd) for ot, cur, nat, usd in raw
             if nat > 0 and usd > 0
+            and (not allowed or cur in allowed)
             and (order_type is None or ot == order_type)
             and (currency is None or cur == currency)
         ]
