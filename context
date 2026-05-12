@@ -1,0 +1,192 @@
+Here's your portable context:
+
+---
+
+**Project: Self-hosted LLM inference on Clore.AI GPU marketplace**
+
+## Platform: Clore.AI
+
+Clore.AI is a P2P GPU rental marketplace. You rent Docker containers on other people's GPUs. You don't control the host OS — only what runs inside the container.
+
+**How Clore's boot process works:**
+- You specify a Docker image and a "startup script" when creating an order
+- Clore's SSH Autoinstall replaces the container entrypoint with S6 overlay (a process supervisor) that runs SSH + `/root/onstart.sh`
+- **Startup script** = runs ONCE on first container creation. Used for installing software and downloading models
+- **`/root/onstart.sh`** = runs EVERY time the container starts/restarts. This is where the llama-server command lives
+- After writing onstart.sh, call `s6-svc -r /var/run/s6/services/onstart` to trigger it. If S6 is ready it runs immediately; if not, S6 runs it when it finishes deploying
+
+**Clore gotchas we discovered the hard way:**
+- The startup script runs in a minimal shell with a stripped PATH. Tools installed via `apt install` during the script often can't be found by name immediately — the shell doesn't see them. This is why we moved to building a custom Docker image with tools pre-baked
+- `huggingface-cli` is deprecated; the new command is `hf`
+- `hf download --local-dir` doesn't reliably place files where expected on these containers
+- Model downloads can produce 0-byte files silently — always verify filesize before proceeding
+- SSH can take several minutes to become available even after Clore says "deployed"
+- Images that force a non-root default user don't work with SSH Autoinstall
+
+## Hardware
+
+Currently renting 2x RTX A5000 (23 GB VRAM each, 46 GB total). Previously tested single RTX 3090/4090 (24GB). On Clore spot pricing, RTX 3090 runs $0.03-0.12/hr, on-demand ~$0.20/hr per GPU.
+
+**RTX A5000 vs RTX 3090:** Same Ampere architecture (compute capability 8.6), but A5000 has 768 GB/s memory bandwidth vs 3090's 936 GB/s. Expect ~18% lower tok/s vs 3090 figures.
+
+## Model: Qwen3.6-35B-A3B
+
+Mixture-of-Experts. 35B total parameters, only 3B active per token (256 experts, 8 activated + 1 shared). Practically this means:
+- VRAM: needs space for all 35B params (like any 35B model)
+- Compute per token: like a 3B model, so very fast (~100-135 tok/s on single 3090)
+- Using Unsloth `UD-Q4_K_XL` GGUF quantization — 20.81 GiB on disk (reported as 22.1GB elsewhere)
+- **Architecture is hybrid Transformer-Mamba** (not pure transformer): only ~4 out of 40 layers use full attention with KV cache; the rest use SSM (Mamba). This means the KV cache is tiny — only ~3.5 KB per token at q8_0 vs ~80 KB for a pure-transformer model of the same size. A 262K context window requires only ~931 MiB for KV.
+
+## Docker image
+
+Base image: `ghcr.io/ggml-org/llama.cpp:server-cuda`
+
+Custom Dockerfile to pre-bake dependencies (avoids PATH issues in startup script):
+
+```dockerfile
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda
+RUN apt update -y && DEBIAN_FRONTEND=noninteractive apt install -y wget curl aria2 python3 python3-pip && pip install huggingface_hub[hf_transfer] --break-system-packages && rm -rf /var/lib/apt/lists/*
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+RUN mkdir -p /models
+```
+
+Push to Docker Hub, use as the Clore container image.
+
+## Working startup scripts
+
+**Single GPU (3090/4090, 24 GB) — file: `startup.sh`**
+
+Uses `-c 98304` (96K context), all layers on one GPU.
+
+**Dual GPU (2x A5000 or 2x 3090, 46–48 GB) — file: `startup2gpu`**
+
+```bash
+#!/bin/sh
+mkdir -p /models
+MODEL="/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+URL="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+export HF_TOKEN="hf_your_token_here"
+
+if [ ! -f "$MODEL" ]; then
+    echo "[$(date)] Starting model download..." >> /var/log/startup.log
+
+    echo "[$(date)] Trying aria2c..." >> /var/log/startup.log
+    aria2c -x 16 -s 16 -k 1M -d /models -o Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+        --header="Authorization: Bearer $HF_TOKEN" \
+        "$URL" >> /var/log/startup.log 2>&1
+
+    if [ ! -f "$MODEL" ]; then
+        echo "[$(date)] aria2c failed, trying wget..." >> /var/log/startup.log
+        wget --header="Authorization: Bearer $HF_TOKEN" \
+            -O "$MODEL" "$URL" >> /var/log/startup.log 2>&1
+    fi
+
+    if [ ! -f "$MODEL" ]; then
+        echo "[$(date)] wget failed, trying curl..." >> /var/log/startup.log
+        curl -L -H "Authorization: Bearer $HF_TOKEN" \
+            -o "$MODEL" "$URL" >> /var/log/startup.log 2>&1
+    fi
+fi
+
+FILESIZE=$(stat -c%s "$MODEL" 2>/dev/null || echo 0)
+if [ "$FILESIZE" -lt 1000000000 ]; then
+    echo "[$(date)] ERROR: All download methods failed ($FILESIZE bytes)" >> /var/log/startup.log
+    rm -f "$MODEL"
+    exit 1
+fi
+
+echo "[$(date)] Download complete ($FILESIZE bytes)" >> /var/log/startup.log
+
+cat > /root/onstart.sh << 'EOF'
+#!/bin/sh
+export LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
+/app/llama-server \
+  -m /models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
+  --host 0.0.0.0 \
+  --port 8080 \
+  -ngl 999 \
+  -fa on \
+  -c 262144 \
+  -np 1 \
+  --cache-type-k q8_0 \
+  --cache-type-v q8_0 \
+  --no-mmap \
+  --jinja \
+  -b 4096 >> /var/log/llama-server.log 2>&1
+EOF
+
+chmod +x /root/onstart.sh
+s6-svc -r /var/run/s6/services/onstart
+```
+
+## llama-server flags and why each matters
+
+- **`-ngl 999`** — offload all layers to GPU
+- **`-fa on`** — flash attention. Must be `-fa on` not just `-fa` on newer llama.cpp builds (we hit this error)
+- **`-c 262144`** — full 262K context (model's training max). On 2x A5000, KV cache costs only ~931 MiB due to hybrid Mamba architecture, leaving 16+ GB headroom
+- **`-c 98304`** — 96K context for single GPU (3090/4090). Uses 23.1GB of 24.5GB VRAM with 1.4GB headroom
+- **`-np 1`** — single parallel slot. llama.cpp auto-sets `np=4` which allocates 4x KV slots and adds overhead even for a single user. Explicitly setting `np=1` gave a 35% speed increase (40 → 54 tok/s) on 2x A5000
+- **`-b 4096`** — batch size for prompt processing (prefill). Default is 2048. Setting 4096 gives ~336 tok/s prefill vs slower default. Does not affect decode speed
+- **`--cache-type-k q8_0 --cache-type-v q8_0`** — the key optimization. Halves KV cache VRAM with no measurable quality loss on Qwen3.6. This is how we went from 8K to 98K context on the same GPU
+- **`--no-mmap`** — loads weights fully into VRAM instead of memory-mapping from disk. Better for GPU-only inference
+- **`--jinja`** — enables Jinja chat templates, required for Qwen3.6's chat format
+
+## What we confirmed works
+
+- Q4_K_XL at 98K context on single 3090: stable, 1.4GB headroom, server reports healthy
+- Q4_K_XL at 262K context on 2x RTX A5000: stable, 16.5GB total VRAM headroom, 54–68 tok/s decode, 336 tok/s prefill
+- q8_0 KV cache quantization: no quality loss, halves KV cache footprint
+- aria2c with 16 parallel connections: ~52 MB/s download speed on Clore nodes
+- Three-tier download fallback (aria2c → wget → curl): handles whatever tools are available
+- HuggingFace token passed via Authorization header to all download methods
+- `-np 1` is critical for single-user deployments — auto `np=4` was causing 35% speed penalty
+
+## What we confirmed does NOT work or help
+
+- **Speculative decoding on this model:** extensively benchmarked, every configuration (ngram-cache, ngram-mod, classic draft with Qwen3.5-0.8B) is 3-12% slower on 3090. The MoE architecture causes expert thrashing during draft verification
+- **Ollama:** wraps llama.cpp but hides KV cache quantization, flash attention, and batch size controls. llama-server directly gives ~1.4x speed and 2x context
+- **`hf download`/`huggingface-cli`:** unreliable on Clore containers. Downloads to cache instead of target dir, or doesn't find the binary
+- **`-fa` without `on`:** newer llama.cpp builds require `-fa on`, bare `-fa` throws an error
+- **Tensor split mode (`-sm tensor`) for multi-GPU:** not implemented for MoE architectures including Qwen3.6
+- **Single GPU at 262K context:** technically loads (22,555 MiB / 23,028 MiB on A5000) but only leaves 184 MiB free, cramping the compute buffer. Resulted in 23 tok/s — slower than dual GPU. Use single GPU only for ≤96K context
+- **Auto `np=4` on dual GPU:** llama.cpp default. Wastes KV slots and adds overhead for single-user setups. Always set `-np 1` explicitly
+
+## 2x RTX A5000 — confirmed working configuration
+
+**VRAM layout (idle, after model load):**
+- GPU0: 15,557 MiB used / 23,028 MiB total → 7,172 MiB free
+- GPU1: 13,330 MiB used / 23,028 MiB total → 9,400 MiB free
+- Total free: ~16.5 GB
+
+**Performance:**
+- Decode: 54–68 tok/s (short sequences; higher end with warm GPU)
+- Prefill: ~336 tok/s
+- Context: 262,144 tokens (full model maximum)
+
+**Why dual GPU pipeline is not 2x faster:** pipeline parallelism is sequential — GPU0 runs its layers, then GPU1 runs its layers per token. No parallel speedup for single-token decode. The second GPU exists purely for VRAM capacity to hold the full 262K KV cache.
+
+**Why speed improved over default (40 → 54 tok/s):** `-np 1` eliminates the 4-slot KV pool and its management overhead that llama.cpp auto-allocated when `n_parallel` was not set.
+
+## Useful debug commands
+
+```bash
+nvidia-smi                                    # VRAM usage
+cat /var/log/startup.log                      # download/setup log
+cat /var/log/llama-server.log | head -30      # server startup log
+curl http://localhost:8080/health              # health check
+s6-svstat /var/run/s6/services/onstart        # S6 service status
+pkill llama-server                            # kill server to restart with new config
+s6-svc -r /var/run/s6/services/onstart        # restart onstart service
+```
+
+## Log locations
+
+- `/var/log/startup.log` — model download and setup
+- `/var/log/llama-server.log` — llama-server output including VRAM breakdown
+
+---
+
+
+
+
+

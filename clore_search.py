@@ -33,6 +33,31 @@ def btc_to_usd(btc: float) -> float:
     return btc * get_btc_usd_price()
 
 
+_CLORE_USD_PRICE = None
+
+
+def get_clore_usd_price() -> float:
+    """Get current CLORE token price in USD."""
+    global _CLORE_USD_PRICE
+    if _CLORE_USD_PRICE is not None:
+        return _CLORE_USD_PRICE
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=clore-network&vs_currencies=usd",
+            timeout=10
+        )
+        _CLORE_USD_PRICE = float(resp.json()["clore-network"]["usd"])
+    except Exception:
+        _CLORE_USD_PRICE = 0.0
+    return _CLORE_USD_PRICE
+
+
+def clore_to_usd(clore: float) -> float:
+    """Convert CLORE token amount to USD."""
+    rate = get_clore_usd_price()
+    return clore * rate if rate > 0 else 0.0
+
+
 # ─── Default configuration ───────────────────────────────────────────────────
 DEFAULT_IMAGE = "archer304/llama.cpp:server-cuda"
 DEFAULT_PORTS = {"22": "tcp", "5000": "tcp", "8080": "http"}
@@ -87,7 +112,7 @@ echo "[$(date)] Download complete ($FILESIZE bytes)" >> /var/log/startup.log
 
 # Also persist onstart for Clore.ai platform compatibility (use .txt extension as .sh is rejected)
 mkdir -p /root
-cat > /root/onstart.txt << 'ONSTART'
+cat > /root/onstart.sh << 'ONSTART'
 #!/bin/sh
 export LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
 /app/llama-server \
@@ -96,14 +121,14 @@ export LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
   --port 8080 \
   -ngl 999 \
   -fa on \
-  -c 65536 \
+  -c 120500 \
   --cache-type-k q8_0 \
   --cache-type-v q8_0 \
   --no-mmap \
   --jinja >> /var/log/llama-server.log 2>&1
 ONSTART
-chmod +x /root/onstart.txt
-echo "[$(date)] onstart.txt written ($(wc -c < /root/onstart.txt) bytes)" >> /var/log/startup.log
+chmod +x /root/onstart.sh
+echo "[$(date)] onstart.sh written ($(wc -c < /root/onstart.sh) bytes)" >> /var/log/startup.log
 
 # Launch llama-server in the background (so startup script can exit cleanly)
 echo "[$(date)] Starting llama-server..." >> /var/log/startup.log
@@ -236,6 +261,7 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
     """
     results = []
     btc_usd = get_btc_usd_price()
+    clore_usd = get_clore_usd_price()
 
     for server in servers:
         specs = server.get("specs", {})
@@ -278,20 +304,33 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
         if currency and currency not in allowed:
             continue
 
-        # Extract USD prices — prefer USD-Blockchain, fall back to BTC*rate
+        # Extract all raw prices per currency and order type
         od_btc = price_info.get("on_demand", {}).get("bitcoin", 0)
         spot_btc = price_info.get("spot", {}).get("bitcoin", 0)
-
         od_usd_raw = price_info.get("on_demand", {}).get("USD-Blockchain", 0)
         spot_usd_raw = price_info.get("spot", {}).get("USD-Blockchain", 0)
+        od_clore = price_info.get("on_demand", {}).get("CLORE-Blockchain", 0)
+        spot_clore = price_info.get("spot", {}).get("CLORE-Blockchain", 0)
 
-        # If USD-Blockchain price is 0 but BTC is available, convert BTC->USD
+        # Unified USD view for display (prefer direct USD, fall back to BTC conversion)
         od_usd = od_usd_raw if od_usd_raw > 0 else btc_to_usd(od_btc) if od_btc > 0 else 0
         spot_usd = spot_usd_raw if spot_usd_raw > 0 else btc_to_usd(spot_btc) if spot_btc > 0 else 0
 
-        # Also get CLORE prices
-        od_clore = price_info.get("on_demand", {}).get("CLORE-Blockchain", 0)
-        spot_clore = price_info.get("spot", {}).get("CLORE-Blockchain", 0)
+        # Build candidate list: (order_type, currency, native_price, usd_equivalent)
+        raw = [
+            ("on-demand", "USD-Blockchain",    od_usd_raw,  od_usd_raw),
+            ("spot",      "USD-Blockchain",    spot_usd_raw, spot_usd_raw),
+            ("on-demand", "bitcoin",           od_btc,       btc_to_usd(od_btc)),
+            ("spot",      "bitcoin",           spot_btc,     btc_to_usd(spot_btc)),
+            ("on-demand", "CLORE-Blockchain",  od_clore,     od_clore * clore_usd if clore_usd > 0 else 0),
+            ("spot",      "CLORE-Blockchain",  spot_clore,   spot_clore * clore_usd if clore_usd > 0 else 0),
+        ]
+        candidates = [(ot, cur, nat, usd) for ot, cur, nat, usd in raw if nat > 0 and usd > 0]
+
+        if candidates:
+            best_ot, best_cur, best_native, best_usd = min(candidates, key=lambda x: x[3])
+        else:
+            best_ot, best_cur, best_native, best_usd = "on-demand", "USD-Blockchain", od_usd_raw, od_usd
 
         cc = net.get("cc", "N/A")  # country code
 
@@ -305,6 +344,10 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             "spot_btc": spot_btc,
             "on_demand_clore": od_clore,
             "spot_clore": spot_clore,
+            "best_usd": best_usd,
+            "best_order_type": best_ot,
+            "best_currency": best_cur,
+            "best_native_price": best_native,
             "cpu": specs.get("cpu", "N/A"),
             "ram": specs.get("ram", "N/A"),
             "disk": specs.get("disk", "N/A"),
@@ -316,26 +359,33 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             "reliability": server.get("reliability", 0),
         })
 
-    # Sort by cheapest on-demand USD price first
-    results.sort(key=lambda x: x["on_demand_usd"])
+    # Sort by cheapest available price across all currencies and order types
+    results.sort(key=lambda x: x["best_usd"])
     return results
 
 
 def print_server_table(servers: list):
     """Print a formatted table of GPU servers with multi-currency pricing."""
     btc_usd = get_btc_usd_price()
+    clore_usd = get_clore_usd_price()
     if not servers:
-        print(f"\n🔍 No servers found with >20GB VRAM, >50Mbps bandwidth.")
-        print(f"   (BTC/USD rate: ${btc_usd:.2f})")
+        print(f"\n No servers found with >20GB VRAM, >50Mbps bandwidth.")
+        print(f"   (BTC/USD: ${btc_usd:,.0f}  CLORE/USD: ${clore_usd:.4f})")
         return
 
-    print("\n" + "=" * 180)
-    print(f"  Found {len(servers)} available GPU server(s) with >20GB VRAM, >50Mbps bandwidth")
-    print(f"  BTC/USD rate: ${btc_usd:,.2f}")
-    print("=" * 180)
+    W = 200
+    print("\n" + "=" * W)
+    print(f"  Found {len(servers)} available GPU server(s) — sorted by cheapest available price")
+    print(f"  BTC/USD: ${btc_usd:,.0f}   CLORE/USD: ${clore_usd:.4f}" if clore_usd > 0
+          else f"  BTC/USD: ${btc_usd:,.0f}   CLORE/USD: unavailable")
+    print("=" * W)
     print(f"  {'#':<4} {'ID':<7} {'GPU':<28} {'VRAM':<5} {'Up':<7} {'Down':<7} {'Rel':<5} {'Loc':<4} "
-          f"{'Allowed':<20} {'$ OD':<8} {'$ Spot':<8} {'BTC OD':<10} {'BTC Spot':<10} {'CLORE OD':<10} {'CLORE Spot':<10}")
-    print("-" * 180)
+          f"{'Best (type/cur)':<22} {'$ OD':<8} {'$ Spot':<8} "
+          f"{'BTC OD':<10} {'BTC Spot':<10} {'CLORE OD':<10} {'CLORE Spot':<10}")
+    print("-" * W)
+
+    _cur_abbr = {"USD-Blockchain": "USD", "bitcoin": "BTC", "CLORE-Blockchain": "CLORE"}
+    _type_abbr = {"on-demand": "OD", "spot": "Sp"}
 
     for i, s in enumerate(servers, 1):
         gpu_display = s["gpu"][:26] + ".." if len(s["gpu"]) > 28 else s["gpu"]
@@ -346,37 +396,84 @@ def print_server_table(servers: list):
         od_clore = s.get('on_demand_clore', 0)
         sp_clore = s.get('spot_clore', 0)
         rel = f"{s['reliability']*100:.0f}%" if s.get('reliability') else "N/A"
-        allowed = ", ".join(s['allowed_coins'])[:18] + ".." if len(", ".join(s['allowed_coins'])) > 20 else ", ".join(s['allowed_coins'])
         net_up = f"{s['net_up']:.0f}"
         net_down = f"{s['net_down']:.0f}"
         cc = s.get('net_cc', '??')
 
-        # Format BTC values (they're per-day, often very small numbers like 1.364e-05)
+        best_usd = s.get('best_usd', od_usd)
+        best_label = (f"{_type_abbr.get(s.get('best_order_type',''), '?')}/"
+                      f"{_cur_abbr.get(s.get('best_currency',''), '?')} ${best_usd:.3f}")
+
         def fmt_btc(v):
-            if v >= 0.001:
-                return f"{v:.5f}"
-            elif v >= 0.0001:
-                return f"{v:.6f}"
-            elif v >= 0.00001:
-                return f"{v:.7f}"
-            else:
-                return f"{v:.8f}"
+            if v <= 0: return "-"
+            if v >= 0.001: return f"{v:.5f}"
+            if v >= 0.0001: return f"{v:.6f}"
+            if v >= 0.00001: return f"{v:.7f}"
+            return f"{v:.8f}"
+
+        def fmt_usd(v):
+            return f"${v:.2f}" if v > 0 else "-"
 
         print(f"  {i:<4} {s['id']:<7} {gpu_display:<28} {s['vram']:<5}GB "
               f"{net_up:<7}Mbps {net_down:<7}Mbps "
-              f"{rel:<5} {cc:<4} {allowed:<20} "
-              f"${od_usd:<7.2f} ${sp_usd:<7.2f} "
+              f"{rel:<5} {cc:<4} "
+              f"{best_label:<22} "
+              f"{fmt_usd(od_usd):<8} {fmt_usd(sp_usd):<8} "
               f"{fmt_btc(od_btc):<10} {fmt_btc(sp_btc):<10} "
               f"{fmt_btc(od_clore):<10} {fmt_btc(sp_clore):<10}")
 
-    print("-" * 180)
-    print(f"  * Prices are per day. '$' = USD, 'BTC' = Bitcoin (per day), 'CLORE' = CLORE tokens (per day).")
-    print(f"  * '$ OD/Spot' = on-demand/guaranteed / spot (cheaper, can be outbid) in USD.")
-    print(f"  * 'BTC OD/Spot' = on-demand/guaranteed / spot in BTC (converted at ${btc_usd:,.0f}/BTC).")
-    print(f"  * 'Rel' = host reliability. 'Loc' = server country code.")
-    print(f"  * 'Up/Down' = measured bandwidth in Mbps (both must exceed 50Mbps).")
-    print(f"  * All servers accept at least one currency: bitcoin, USD-Blockchain, CLORE-Blockchain.")
-    print("=" * 180)
+    print("-" * W)
+    print(f"  * Sorted by cheapest option (Best col) — OD=on-demand, Sp=spot.")
+    print(f"  * 'Best' shows the cheapest combo of order type + currency, in USD/day.")
+    print(f"  * $ OD/Spot = USD-Blockchain prices. BTC/CLORE cols show native token amounts/day.")
+    print(f"  * Spot is interruptible (can be outbid). OD is guaranteed.")
+    print(f"  * 'rent <id>' with no flags auto-selects the cheapest option shown in Best.")
+    print("=" * W)
+
+
+def find_best_price_for_server(servers: list, server_id: int,
+                               order_type: str = None, currency: str = None):
+    """Find the cheapest currency/order_type combo for a specific server.
+
+    Optionally constrain to a given order_type or currency.
+    Returns (order_type, currency, usd_price, native_price) or None if server not found.
+    """
+    btc_usd = get_btc_usd_price()
+    clore_usd = get_clore_usd_price()
+
+    for server in servers:
+        if server.get("id") != server_id:
+            continue
+        price_info = server.get("price", {})
+
+        od_usd_raw = price_info.get("on_demand", {}).get("USD-Blockchain", 0)
+        sp_usd_raw = price_info.get("spot", {}).get("USD-Blockchain", 0)
+        od_btc = price_info.get("on_demand", {}).get("bitcoin", 0)
+        sp_btc = price_info.get("spot", {}).get("bitcoin", 0)
+        od_clore = price_info.get("on_demand", {}).get("CLORE-Blockchain", 0)
+        sp_clore = price_info.get("spot", {}).get("CLORE-Blockchain", 0)
+
+        # (order_type, currency, native_price, usd_equivalent)
+        raw = [
+            ("on-demand", "USD-Blockchain",   od_usd_raw,  od_usd_raw),
+            ("spot",      "USD-Blockchain",   sp_usd_raw,  sp_usd_raw),
+            ("on-demand", "bitcoin",          od_btc,      od_btc * btc_usd),
+            ("spot",      "bitcoin",          sp_btc,      sp_btc * btc_usd),
+            ("on-demand", "CLORE-Blockchain", od_clore,    od_clore * clore_usd if clore_usd > 0 else 0),
+            ("spot",      "CLORE-Blockchain", sp_clore,    sp_clore * clore_usd if clore_usd > 0 else 0),
+        ]
+        candidates = [
+            (ot, cur, nat, usd) for ot, cur, nat, usd in raw
+            if nat > 0 and usd > 0
+            and (order_type is None or ot == order_type)
+            and (currency is None or cur == currency)
+        ]
+        if not candidates:
+            return None
+        best = min(candidates, key=lambda x: x[3])
+        return (best[0], best[1], best[3], best[2])  # (type, currency, usd, native)
+
+    return None
 
 
 def rent_server(client: CloreClient, server_id: int, order_type: str = "on-demand",
@@ -553,24 +650,29 @@ def main():
 
     elif action == "rent":
         if len(sys.argv) < 3:
-            print("❌ Please specify server ID and type")
+            print("❌ Please specify a server ID")
+            print("   Example: python clore_search.py rent 103669")
             print("   Example: python clore_search.py rent 103669 on-demand --currency USD-Blockchain")
             sys.exit(1)
         server_id = int(sys.argv[2])
-        order_type = "on-demand"
-        currency = DEFAULT_CURRENCY
+        order_type = None    # None = auto-detect
+        currency = None      # None = auto-detect
         spot_price = None
+        explicit_type = False
+        explicit_currency = False
         i = 3
         while i < len(sys.argv):
             arg = sys.argv[i]
             if arg in ("on-demand", "spot"):
                 order_type = arg
+                explicit_type = True
             elif arg == "--currency":
                 if i + 1 < len(sys.argv):
                     currency = sys.argv[i + 1]
                     if currency not in ("bitcoin", "CLORE-Blockchain", "USD-Blockchain"):
                         print(f"❌ Invalid currency '{currency}'. Must be bitcoin, CLORE-Blockchain, or USD-Blockchain")
                         sys.exit(1)
+                    explicit_currency = True
                     i += 1
                 else:
                     print("❌ --currency requires a value")
@@ -586,6 +688,30 @@ def main():
                 print(f"❌ Unknown rent argument: {arg}")
                 sys.exit(1)
             i += 1
+
+        # Auto-detect any unspecified type/currency by picking cheapest available
+        if not explicit_type or not explicit_currency:
+            print("  Fetching marketplace to find cheapest option...")
+            mkt_servers = client.get_marketplace()
+            best = find_best_price_for_server(
+                mkt_servers, server_id,
+                order_type=order_type if explicit_type else None,
+                currency=currency if explicit_currency else None,
+            )
+            if best is None:
+                print(f"❌ Server #{server_id} not found in marketplace or no valid prices.")
+                sys.exit(1)
+            auto_type, auto_cur, auto_usd, auto_native = best
+            if not explicit_type:
+                order_type = auto_type
+            if not explicit_currency:
+                currency = auto_cur
+            if order_type == "spot" and spot_price is None:
+                spot_price = auto_native
+            t_flag = "" if explicit_type else " (auto)"
+            c_flag = "" if explicit_currency else " (auto)"
+            print(f"  Best price: {order_type}{t_flag} / {currency}{c_flag} — ${auto_usd:.4f}/day")
+
         rent_server(client, server_id, order_type, currency=currency, spot_price=spot_price)
 
     elif action == "orders":
