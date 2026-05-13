@@ -65,6 +65,7 @@ DEFAULT_SSH_PASSWORD = "DRpjRuu88XtvWYHnNXcB5Ksx"
 DEFAULT_ENTRYPOINT = "ssh_autoinstall"
 DEFAULT_CURRENCY = "USD-Blockchain"
 DEFAULT_MIN_BANDWIDTH = 50  # Mbps, both up and down
+DEFAULT_MIN_CUDA = 12.8
 
 DEFAULT_STARTUP_SCRIPT = """#!/bin/sh
 set -e
@@ -248,9 +249,9 @@ def extract_gpu_info(specs: dict) -> tuple:
 
 
 def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = None,
-                       min_bandwidth_mbps: int = 50) -> list:
+                       min_bandwidth_mbps: int = 50, min_cuda: float = 12.8) -> list:
     """Filter servers with GPU VRAM > min_vram_gb, bandwidth > min_bandwidth_mbps,
-    and not currently rented.
+    cuda_version >= min_cuda, and not currently rented.
 
     Args:
         servers: Raw marketplace server list.
@@ -258,6 +259,7 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
         currency: Optional currency filter — 'bitcoin', 'CLORE-Blockchain', 'USD-Blockchain'.
                   If None, shows all servers that accept at least one currency.
         min_bandwidth_mbps: Minimum network bandwidth (both up and down) in Mbps.
+        min_cuda: Minimum CUDA version required (default 12.8).
     """
     results = []
     btc_usd = get_btc_usd_price()
@@ -271,6 +273,15 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             continue
 
         if server.get("rented", True):
+            continue
+
+        # Check CUDA version (top-level field, string like "12.8")
+        cuda_str = server.get("cuda_version", "")
+        try:
+            cuda_ver = float(cuda_str) if cuda_str else 0.0
+        except (ValueError, TypeError):
+            cuda_ver = 0.0
+        if cuda_ver < min_cuda:
             continue
 
         # Check bandwidth (specs.net.up and specs.net.down in Mbps)
@@ -338,6 +349,7 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
             "id": server.get("id"),
             "gpu": gpu_name,
             "vram": gpuram,
+            "cuda_version": cuda_ver,
             "on_demand_usd": od_usd,
             "spot_usd": spot_usd,
             "on_demand_btc": od_btc,
@@ -379,7 +391,7 @@ def print_server_table(servers: list):
     print(f"  BTC/USD: ${btc_usd:,.0f}   CLORE/USD: ${clore_usd:.4f}" if clore_usd > 0
           else f"  BTC/USD: ${btc_usd:,.0f}   CLORE/USD: unavailable")
     print("=" * W)
-    print(f"  {'#':<4} {'ID':<7} {'GPU':<28} {'VRAM':<5} {'Up':<7} {'Down':<7} {'Rel':<5} {'Loc':<4} "
+    print(f"  {'#':<4} {'ID':<7} {'GPU':<28} {'VRAM':<8} {'CUDA':<6} {'Up':<7} {'Down':<7} {'Rel':<5} {'Loc':<4} "
           f"{'Best (type/cur)':<22} {'$ OD':<8} {'$ Spot':<8} "
           f"{'BTC OD':<10} {'BTC Spot':<10} {'CLORE OD':<10} {'CLORE Spot':<10}")
     print("-" * W)
@@ -414,7 +426,10 @@ def print_server_table(servers: list):
         def fmt_usd(v):
             return f"${v:.2f}" if v > 0 else "-"
 
-        print(f"  {i:<4} {s['id']:<7} {gpu_display:<28} {s['vram']:<5}GB "
+        cuda_display = f"{s.get('cuda_version', 0):.1f}" if s.get('cuda_version') else "?"
+        vram_display = f"{s['vram']}GB"
+        print(f"  {i:<4} {s['id']:<7} {gpu_display:<28} {vram_display:<8}"
+              f"{cuda_display:<6} "
               f"{net_up:<7}Mbps {net_down:<7}Mbps "
               f"{rel:<5} {cc:<4} "
               f"{best_label:<22} "
@@ -618,6 +633,7 @@ def main():
         min_vram = 20
         currency_filter = None
         min_bandwidth = DEFAULT_MIN_BANDWIDTH
+        min_cuda = DEFAULT_MIN_CUDA
         i = 2
         while i < len(sys.argv):
             arg = sys.argv[i]
@@ -638,6 +654,17 @@ def main():
                 else:
                     print("❌ --min-bandwidth requires a numeric value")
                     sys.exit(1)
+            elif arg == "--min-cuda":
+                if i + 1 < len(sys.argv):
+                    try:
+                        min_cuda = float(sys.argv[i + 1])
+                        i += 1
+                    except ValueError:
+                        print("❌ --min-cuda requires a numeric value (e.g. 12.8)")
+                        sys.exit(1)
+                else:
+                    print("❌ --min-cuda requires a value")
+                    sys.exit(1)
             else:
                 try:
                     min_vram = int(arg)
@@ -647,7 +674,7 @@ def main():
             i += 1
 
         servers = client.get_marketplace()
-        filtered = filter_gpu_servers(servers, min_vram, currency_filter, min_bandwidth)
+        filtered = filter_gpu_servers(servers, min_vram, currency_filter, min_bandwidth, min_cuda)
         print_server_table(filtered)
 
     elif action == "rent":
