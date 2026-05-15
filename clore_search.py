@@ -68,32 +68,25 @@ DEFAULT_MIN_BANDWIDTH = 50  # Mbps, both up and down
 DEFAULT_MIN_CUDA = 12.8
 
 DEFAULT_STARTUP_SCRIPT = """#!/bin/sh
-set -e
 mkdir -p /models
 MODEL="/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 URL="https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 export HF_TOKEN="hf_your_token_here"
 
-echo "[$(date)] Starting startup script..." >> /var/log/startup.log
-
-# Download model if not present
 if [ ! -f "$MODEL" ]; then
     echo "[$(date)] Starting model download..." >> /var/log/startup.log
 
-    # Try 1: aria2c (multi-connection, fastest that actually works)
     echo "[$(date)] Trying aria2c..." >> /var/log/startup.log
     aria2c -x 16 -s 16 -k 1M -d /models -o Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
         --header="Authorization: Bearer $HF_TOKEN" \
         "$URL" >> /var/log/startup.log 2>&1
 
-    # Try 2: wget
     if [ ! -f "$MODEL" ]; then
         echo "[$(date)] aria2c failed, trying wget..." >> /var/log/startup.log
         wget --header="Authorization: Bearer $HF_TOKEN" \
             -O "$MODEL" "$URL" >> /var/log/startup.log 2>&1
     fi
 
-    # Try 3: curl
     if [ ! -f "$MODEL" ]; then
         echo "[$(date)] wget failed, trying curl..." >> /var/log/startup.log
         curl -L -H "Authorization: Bearer $HF_TOKEN" \
@@ -101,7 +94,6 @@ if [ ! -f "$MODEL" ]; then
     fi
 fi
 
-# Verify download
 FILESIZE=$(stat -c%s "$MODEL" 2>/dev/null || echo 0)
 if [ "$FILESIZE" -lt 1000000000 ]; then
     echo "[$(date)] ERROR: All download methods failed ($FILESIZE bytes)" >> /var/log/startup.log
@@ -111,42 +103,57 @@ fi
 
 echo "[$(date)] Download complete ($FILESIZE bytes)" >> /var/log/startup.log
 
-# Also persist onstart for Clore.ai platform compatibility (use .txt extension as .sh is rejected)
-mkdir -p /root
-cat > /root/onstart.sh << 'ONSTART'
+pip install flask --break-system-packages --ignore-installed -q >> /var/log/startup.log 2>&1
+
+cat > /root/llama_config.json << 'EOF'
+{
+  "model": "/models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+  "context": 262144,
+  "temp": 0.6,
+  "top_k": 20,
+  "top_p": 0.95,
+  "min_p": 0.05,
+  "repeat_penalty": 1.0,
+  "np": 1,
+  "batch_size": 4096
+}
+EOF
+
+cat > /root/onstart.sh << 'EOF'
 #!/bin/sh
 export LD_LIBRARY_PATH=/app:$LD_LIBRARY_PATH
+
+# Model manager on port 5000
+python3 /app/model_manager.py >> /var/log/model-manager.log 2>&1 &
+
+# Dual GPU — full 262K context across both cards via pipeline parallelism.
+# Qwen3.6 hybrid Mamba: KV cache is only ~2.8 GB at 262K (vs ~80 GB for a dense model).
+# -np 1: single KV slot — critical, auto np=4 causes 35% speed penalty.
+# -b 4096: faster prefill vs default 2048.
+# Note: tensor split (-sm tensor) is NOT supported for MoE — pipeline only.
 /app/llama-server \
   -m /models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
   --host 0.0.0.0 \
   --port 8080 \
   -ngl 999 \
   -fa on \
-  -c 240500 \
+  -c 262144 \
+  -np 1 \
   --cache-type-k q8_0 \
   --cache-type-v q8_0 \
   --no-mmap \
-  --jinja >> /var/log/llama-server.log 2>&1
-ONSTART
+  --jinja \
+  -b 4096 \
+  --temp 0.6 \
+  --top-k 20 \
+  --top-p 0.95 \
+  --min-p 0.05 \
+  --repeat-penalty 1.0 >> /var/log/llama-server.log 2>&1
+EOF
+
 chmod +x /root/onstart.sh
-echo "[$(date)] onstart.sh written ($(wc -c < /root/onstart.sh) bytes)" >> /var/log/startup.log
+s6-svc -r /var/run/s6/services/onstart
 
-# Launch llama-server in the background (so startup script can exit cleanly)
-echo "[$(date)] Starting llama-server..." >> /var/log/startup.log
-nohup /app/llama-server \
-  -m /models/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf \
-  --host 0.0.0.0 \
-  --port 8080 \
-  -ngl 999 \
-  -fa on \
-  -c 65536 \
-  --cache-type-k q8_0 \
-  --cache-type-v q8_0 \
-  --no-mmap \
-  --jinja >> /var/log/llama-server.log 2>&1 &
-
-echo "[$(date)] llama-server launched (PID: $!) on port 8080" >> /var/log/startup.log
-echo "[$(date)] Startup script complete!" >> /var/log/startup.log
 """
 
 
