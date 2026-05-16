@@ -1,0 +1,8 @@
+.git
+.venv
+.idea
+.claude
+__pycache__
+*.pyc
+context
+README.md

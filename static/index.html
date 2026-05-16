@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Clore Search & Rent</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-2: #1d222c;
+    --line: #262c37;
+    --text: #e6e8eb;
+    --muted: #8a93a4;
+    --accent: #4ea1ff;
+    --accent-2: #2f7ad9;
+    --good: #4ade80;
+    --warn: #fbbf24;
+    --bad: #ef4444;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); text-decoration: none; }
+
+  header {
+    padding: 12px 18px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 18px; background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .rates { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  header .tabs { margin-left: auto; display: flex; gap: 2px; }
+  header .tabs button {
+    background: transparent; border: none; color: var(--muted);
+    padding: 6px 12px; cursor: pointer; border-radius: 6px; font-size: 13px;
+  }
+  header .tabs button:hover { color: var(--text); }
+  header .tabs button.active { background: var(--panel-2); color: var(--text); }
+
+  main { padding: 14px 18px 40px; }
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 12px;
+    background: var(--panel); padding: 12px; border-radius: 8px; border: 1px solid var(--line);
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  input, select, textarea, button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 9px; font-size: 13px; font-family: inherit;
+  }
+  input[type=number] { width: 90px; }
+  input[type=text] { width: 220px; }
+  select { min-width: 130px; }
+  button.primary {
+    background: var(--accent); color: #06121f; border-color: var(--accent);
+    cursor: pointer; font-weight: 600;
+  }
+  button.primary:hover { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+  button.primary:disabled { opacity: .5; cursor: not-allowed; }
+  button.ghost {
+    background: transparent; color: var(--muted); cursor: pointer;
+  }
+  button.ghost:hover { color: var(--text); }
+  button.danger {
+    background: var(--bad); color: #fff; border-color: var(--bad); cursor: pointer; font-weight: 600;
+  }
+
+  .banner {
+    padding: 10px 14px; border-radius: 6px; margin-bottom: 12px;
+    background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.4); color: #fecaca;
+  }
+  .banner.good { background: rgba(74,222,128,.10); border-color: rgba(74,222,128,.4); color: #bbf7d0; }
+  .banner.info { background: rgba(78,161,255,.10); border-color: rgba(78,161,255,.4); color: #cfe3ff; }
+
+  .summary { color: var(--muted); font-size: 12px; margin: 6px 2px 8px; font-family: var(--mono); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 8px;
+          overflow: hidden; border: 1px solid var(--line); }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); font-size: 13px;
+           white-space: nowrap; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 500; text-transform: uppercase;
+       font-size: 10.5px; letter-spacing: .5px; cursor: pointer; user-select: none; position: sticky; top: 0; }
+  th.sortable:hover { color: var(--text); }
+  th .sort-ind { color: var(--accent); margin-left: 4px; }
+  tr:hover td { background: rgba(255,255,255,.02); }
+  td.num { font-family: var(--mono); text-align: right; }
+  td.mono { font-family: var(--mono); }
+  td .best { color: var(--good); font-weight: 600; }
+  td .dim { color: var(--muted); }
+  .pill { padding: 1px 6px; border-radius: 999px; font-size: 11px;
+          background: rgba(78,161,255,.15); color: var(--accent); border: 1px solid rgba(78,161,255,.3); }
+  .pill.spot { background: rgba(251,191,36,.15); color: var(--warn); border-color: rgba(251,191,36,.3); }
+  .pill.od { background: rgba(74,222,128,.15); color: var(--good); border-color: rgba(74,222,128,.3); }
+
+  .empty { text-align: center; padding: 40px; color: var(--muted); }
+
+  /* Modal */
+  .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+           align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; z-index: 50; }
+  .scrim.open { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           width: min(720px, 100%); padding: 18px 20px 20px; }
+  .modal h2 { margin: 0 0 4px; font-size: 16px; }
+  .modal .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; font-family: var(--mono); }
+  .modal .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+  .modal .full { grid-column: 1 / -1; }
+  .modal label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .modal .field { gap: 4px; }
+  .modal textarea { width: 100%; min-height: 200px; font-family: var(--mono); font-size: 12px; resize: vertical; }
+  .modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+  .modal .msg { padding: 10px; border-radius: 6px; margin-top: 12px; font-size: 12.5px; }
+  .modal .msg.bad { background: rgba(239,68,68,.12); color: #fecaca; }
+  .modal .msg.good { background: rgba(74,222,128,.10); color: #bbf7d0; font-family: var(--mono); white-space: pre-wrap; }
+
+  .row-hide { display: none; }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .small-actions { display: flex; gap: 6px; }
+  .small-actions button { padding: 4px 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ Clore Search & Rent</h1>
+  <div class="rates" id="rates">BTC/USD … · CLORE/USD …</div>
+  <div class="tabs">
+    <button data-tab="search" class="active">Search</button>
+    <button data-tab="orders">Orders</button>
+    <button data-tab="wallets">Wallets</button>
+  </div>
+</header>
+
+<main>
+
+<div id="api-key-banner" class="banner row-hide">
+  No API key set on the server. Set <code>CLORE_API_KEY</code> env var and restart.
+</div>
+
+<!-- ─── SEARCH TAB ──────────────────────────────────────────────────────── -->
+<section class="tab-panel active" id="tab-search">
+  <div class="toolbar">
+    <div class="field">
+      <label>Min VRAM (GB)</label>
+      <input type="number" id="f-vram" min="0" step="1" />
+    </div>
+    <div class="field">
+      <label>Min bandwidth (Mbps)</label>
+      <input type="number" id="f-bw" min="0" step="1" />
+    </div>
+    <div class="field">
+      <label>Min CUDA</label>
+      <input type="number" id="f-cuda" min="0" step="0.1" />
+    </div>
+    <div class="field">
+      <label>Currency</label>
+      <select id="f-currency">
+        <option value="">Any</option>
+        <option value="USD-Blockchain">USD-Blockchain</option>
+        <option value="bitcoin">bitcoin</option>
+        <option value="CLORE-Blockchain">CLORE-Blockchain</option>
+      </select>
+    </div>
+    <div class="field" style="flex: 1; min-width: 220px;">
+      <label>GPU name contains</label>
+      <input type="text" id="f-search" placeholder="e.g. 3090, A100" style="width: 100%;" />
+    </div>
+    <button class="primary" id="btn-refresh">↻ Search</button>
+  </div>
+
+  <div id="search-summary" class="summary">Click Search to load marketplace.</div>
+
+  <div style="overflow-x: auto;">
+    <table id="server-table">
+      <thead>
+        <tr>
+          <th class="sortable" data-sort="id">ID</th>
+          <th class="sortable" data-sort="gpu">GPU</th>
+          <th class="sortable" data-sort="vram">VRAM</th>
+          <th class="sortable" data-sort="cuda_version">CUDA</th>
+          <th class="sortable" data-sort="net_up">Up</th>
+          <th class="sortable" data-sort="net_down">Down</th>
+          <th class="sortable" data-sort="reliability">Rel</th>
+          <th class="sortable" data-sort="net_cc">Loc</th>
+          <th class="sortable" data-sort="best_usd">Best $/day</th>
+          <th class="sortable" data-sort="on_demand_usd">OD $</th>
+          <th class="sortable" data-sort="spot_usd">Spot $</th>
+          <th class="sortable" data-sort="on_demand_btc">OD BTC</th>
+          <th class="sortable" data-sort="on_demand_clore">OD CLORE</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="server-rows"></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ─── ORDERS TAB ─────────────────────────────────────────────────────── -->
+<section class="tab-panel" id="tab-orders">
+  <div class="toolbar">
+    <button class="primary" id="btn-orders-refresh">↻ Refresh orders</button>
+    <label style="display:flex; align-items:center; gap:6px; color:var(--muted); font-size:12px;">
+      <input type="checkbox" id="orders-completed" checked style="width:auto;" />
+      Include completed
+    </label>
+  </div>
+  <div id="orders-content" class="empty">Click Refresh to load.</div>
+</section>
+
+<!-- ─── WALLETS TAB ────────────────────────────────────────────────────── -->
+<section class="tab-panel" id="tab-wallets">
+  <div class="toolbar">
+    <button class="primary" id="btn-wallets-refresh">↻ Refresh wallets</button>
+  </div>
+  <div id="wallets-content" class="empty">Click Refresh to load.</div>
+</section>
+
+</main>
+
+<!-- ─── RENT MODAL ─────────────────────────────────────────────────────── -->
+<div class="scrim" id="rent-scrim">
+  <div class="modal">
+    <h2 id="rent-title">Rent server</h2>
+    <div class="sub" id="rent-sub"></div>
+
+    <div class="grid">
+      <div class="field">
+        <label>Order type</label>
+        <select id="r-type">
+          <option value="">auto (cheapest)</option>
+          <option value="on-demand">on-demand</option>
+          <option value="spot">spot</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Currency</label>
+        <select id="r-currency">
+          <option value="">auto (cheapest)</option>
+          <option value="USD-Blockchain">USD-Blockchain</option>
+          <option value="bitcoin">bitcoin</option>
+          <option value="CLORE-Blockchain">CLORE-Blockchain</option>
+        </select>
+      </div>
+      <div class="field" id="r-spot-field" style="display:none;">
+        <label>Spot bid (native / day)</label>
+        <input type="number" id="r-spot" step="0.0000001" />
+      </div>
+      <div class="field">
+        <label>Docker image</label>
+        <input type="text" id="r-image" />
+      </div>
+      <div class="field full">
+        <label>Ports (JSON)</label>
+        <input type="text" id="r-ports" />
+      </div>
+      <div class="field">
+        <label>SSH password</label>
+        <input type="text" id="r-ssh" />
+      </div>
+      <div class="field">
+        <label>autossh entrypoint</label>
+        <input type="text" id="r-entry" />
+      </div>
+      <div class="field full">
+        <label>Startup script (command)</label>
+        <textarea id="r-command" spellcheck="false"></textarea>
+      </div>
+    </div>
+
+    <div class="msg bad row-hide" id="rent-error"></div>
+    <div class="msg good row-hide" id="rent-success"></div>
+
+    <div class="actions">
+      <button class="ghost" id="rent-cancel">Cancel</button>
+      <button class="danger" id="rent-confirm">Rent</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ─── State ──────────────────────────────────────────────────────────────────
+const state = {
+  defaults: null,
+  servers: [],
+  sortKey: "best_usd",
+  sortDir: 1,
+  pendingServer: null,
+};
+
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+// ─── API helpers ────────────────────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  let body = null;
+  try { body = await res.json(); } catch (_e) {}
+  if (!res.ok) {
+    const detail = body && (body.detail || body.error) || res.statusText;
+    throw new Error(detail);
+  }
+  return body;
+}
+
+// ─── Tabs ───────────────────────────────────────────────────────────────────
+$$("header .tabs button").forEach((b) => {
+  b.addEventListener("click", () => {
+    $$("header .tabs button").forEach((x) => x.classList.toggle("active", x === b));
+    const tab = b.dataset.tab;
+    $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${tab}`));
+  });
+});
+
+// ─── Init: load defaults + prices ───────────────────────────────────────────
+async function init() {
+  try {
+    const r = await api("/api/defaults");
+    state.defaults = r.data;
+    $("#f-vram").value = state.defaults.min_vram;
+    $("#f-bw").value = state.defaults.min_bandwidth;
+    $("#f-cuda").value = state.defaults.min_cuda;
+    if (!state.defaults.api_key_set) {
+      $("#api-key-banner").classList.remove("row-hide");
+    }
+  } catch (e) {
+    $("#api-key-banner").classList.remove("row-hide");
+    $("#api-key-banner").textContent = "Failed to load defaults: " + e.message;
+  }
+  try {
+    const p = await api("/api/prices");
+    const btc = p.data.btc_usd.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    const clore = p.data.clore_usd > 0 ? p.data.clore_usd.toFixed(4) : "n/a";
+    $("#rates").textContent = `BTC/USD $${btc} · CLORE/USD $${clore}`;
+  } catch (_) { /* non-fatal */ }
+}
+
+// ─── Search ─────────────────────────────────────────────────────────────────
+async function refreshSearch() {
+  const btn = $("#btn-refresh");
+  btn.disabled = true; btn.textContent = "Loading…";
+  $("#search-summary").textContent = "Fetching marketplace (≥1 sec rate-limited)…";
+  $("#server-rows").innerHTML = "";
+  try {
+    const params = new URLSearchParams();
+    params.set("min_vram", $("#f-vram").value || "0");
+    params.set("min_bandwidth", $("#f-bw").value || "0");
+    params.set("min_cuda", $("#f-cuda").value || "0");
+    const cur = $("#f-currency").value;
+    if (cur) params.set("currency", cur);
+    const q = $("#f-search").value.trim();
+    if (q) params.set("search", q);
+
+    const r = await api("/api/marketplace?" + params.toString());
+    state.servers = r.data.servers;
+    $("#search-summary").textContent =
+      `Found ${r.data.count} server(s) · BTC/USD $${r.data.btc_usd.toFixed(0)} · CLORE/USD $${(r.data.clore_usd||0).toFixed(4)}`;
+    sortAndRender();
+  } catch (e) {
+    $("#search-summary").textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = "↻ Search";
+  }
+}
+
+function sortAndRender() {
+  const key = state.sortKey;
+  const dir = state.sortDir;
+  const rows = [...state.servers].sort((a, b) => {
+    const av = a[key], bv = b[key];
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+    return String(av).localeCompare(String(bv)) * dir;
+  });
+
+  // Update sort indicators
+  $$("#server-table th.sortable").forEach((th) => {
+    const ind = th.querySelector(".sort-ind");
+    if (ind) ind.remove();
+    if (th.dataset.sort === key) {
+      const s = document.createElement("span");
+      s.className = "sort-ind";
+      s.textContent = dir > 0 ? "▲" : "▼";
+      th.appendChild(s);
+    }
+  });
+
+  const tbody = $("#server-rows");
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="14" class="empty">No matching servers.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map((s) => {
+    const rel = s.reliability != null ? `${(s.reliability*100).toFixed(0)}%` : "—";
+    const bestType = s.best_order_type === "spot" ? '<span class="pill spot">spot</span>'
+                                                  : '<span class="pill od">on-demand</span>';
+    const bestCurAbbr = ({"USD-Blockchain": "USD", "bitcoin": "BTC", "CLORE-Blockchain": "CLORE"})[s.best_currency] || "?";
+    const fmt$ = (v) => v > 0 ? `$${v.toFixed(3)}` : '<span class="dim">—</span>';
+    const fmtBtc = (v) => {
+      if (!v || v <= 0) return '<span class="dim">—</span>';
+      if (v >= 0.001) return v.toFixed(5);
+      if (v >= 0.0001) return v.toFixed(6);
+      if (v >= 0.00001) return v.toFixed(7);
+      return v.toFixed(8);
+    };
+    return `<tr>
+      <td class="mono">${s.id}</td>
+      <td title="${escapeAttr(s.gpu)}">${escapeHtml(s.gpu)}</td>
+      <td class="num">${s.vram}GB</td>
+      <td class="num">${s.cuda_version ? s.cuda_version.toFixed(1) : "—"}</td>
+      <td class="num">${Math.round(s.net_up)}</td>
+      <td class="num">${Math.round(s.net_down)}</td>
+      <td class="num">${rel}</td>
+      <td class="mono">${escapeHtml(s.net_cc || "—")}</td>
+      <td class="num"><span class="best">$${(s.best_usd||0).toFixed(3)}</span> ${bestType} <span class="dim">${bestCurAbbr}</span></td>
+      <td class="num">${fmt$(s.on_demand_usd)}</td>
+      <td class="num">${fmt$(s.spot_usd)}</td>
+      <td class="num">${fmtBtc(s.on_demand_btc)}</td>
+      <td class="num">${fmtBtc(s.on_demand_clore)}</td>
+      <td><button class="primary" data-rent="${s.id}">Rent</button></td>
+    </tr>`;
+  }).join("");
+
+  tbody.querySelectorAll("button[data-rent]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const id = parseInt(b.dataset.rent, 10);
+      const srv = state.servers.find((x) => x.id === id);
+      openRentModal(srv);
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function escapeAttr(s) { return escapeHtml(s); }
+
+$$("#server-table th.sortable").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (state.sortKey === key) state.sortDir *= -1;
+    else { state.sortKey = key; state.sortDir = 1; }
+    sortAndRender();
+  });
+});
+
+$("#btn-refresh").addEventListener("click", refreshSearch);
+$("#f-search").addEventListener("keydown", (e) => { if (e.key === "Enter") refreshSearch(); });
+
+// ─── Rent modal ─────────────────────────────────────────────────────────────
+function openRentModal(srv) {
+  if (!srv) return;
+  state.pendingServer = srv;
+  const d = state.defaults || {};
+  $("#rent-title").textContent = `Rent server #${srv.id} — ${srv.gpu}`;
+  const bestCur = ({"USD-Blockchain": "USD", "bitcoin": "BTC", "CLORE-Blockchain": "CLORE"})[srv.best_currency] || "?";
+  $("#rent-sub").textContent =
+    `Best available: ${srv.best_order_type} / ${bestCur}  $${(srv.best_usd||0).toFixed(4)}/day · ` +
+    `VRAM ${srv.vram}GB · CUDA ${srv.cuda_version} · ${srv.net_cc}`;
+
+  // Prefill with auto + defaults
+  $("#r-type").value = "";
+  $("#r-currency").value = "";
+  $("#r-spot").value = "";
+  $("#r-spot-field").style.display = "none";
+  $("#r-image").value = d.image || "";
+  $("#r-ports").value = JSON.stringify(d.ports || {});
+  $("#r-ssh").value = d.ssh_password || "";
+  $("#r-entry").value = d.autossh_entrypoint || "";
+  $("#r-command").value = d.command || "";
+
+  $("#rent-error").classList.add("row-hide");
+  $("#rent-success").classList.add("row-hide");
+  $("#rent-confirm").disabled = false;
+  $("#rent-confirm").textContent = "Rent";
+
+  $("#rent-scrim").classList.add("open");
+}
+
+function closeRentModal() {
+  $("#rent-scrim").classList.remove("open");
+  state.pendingServer = null;
+}
+
+$("#rent-cancel").addEventListener("click", closeRentModal);
+$("#rent-scrim").addEventListener("click", (e) => {
+  if (e.target.id === "rent-scrim") closeRentModal();
+});
+
+$("#r-type").addEventListener("change", () => {
+  $("#r-spot-field").style.display = $("#r-type").value === "spot" ? "" : "none";
+});
+
+$("#rent-confirm").addEventListener("click", async () => {
+  const srv = state.pendingServer;
+  if (!srv) return;
+  $("#rent-error").classList.add("row-hide");
+  $("#rent-success").classList.add("row-hide");
+  $("#rent-confirm").disabled = true;
+  $("#rent-confirm").textContent = "Renting…";
+
+  let ports;
+  try {
+    const txt = $("#r-ports").value.trim();
+    ports = txt ? JSON.parse(txt) : null;
+  } catch (e) {
+    $("#rent-error").textContent = "Ports must be valid JSON: " + e.message;
+    $("#rent-error").classList.remove("row-hide");
+    $("#rent-confirm").disabled = false;
+    $("#rent-confirm").textContent = "Rent";
+    return;
+  }
+
+  const body = {
+    server_id: srv.id,
+    order_type: $("#r-type").value || null,
+    currency: $("#r-currency").value || null,
+    spot_price: $("#r-spot").value ? parseFloat($("#r-spot").value) : null,
+    image: $("#r-image").value || null,
+    ports: ports,
+    ssh_password: $("#r-ssh").value || null,
+    autossh_entrypoint: $("#r-entry").value || null,
+    command: $("#r-command").value || null,
+  };
+
+  try {
+    const res = await fetch("/api/rent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      const msg = data.error || data.detail || `HTTP ${res.status}`;
+      throw new Error(msg);
+    }
+    const d = data.data;
+    $("#rent-success").textContent =
+      `✅ Order created\n\n` +
+      `Order ID: ${d.order?.id ?? "n/a"}\n` +
+      `Type:     ${d.order_type}\n` +
+      `Currency: ${d.currency}\n` +
+      (d.spot_price ? `Spot bid: ${d.spot_price}\n` : "") +
+      `\nCheck the Orders tab for connection details.`;
+    $("#rent-success").classList.remove("row-hide");
+    $("#rent-confirm").textContent = "Done";
+  } catch (e) {
+    $("#rent-error").textContent = "❌ " + e.message;
+    $("#rent-error").classList.remove("row-hide");
+    $("#rent-confirm").disabled = false;
+    $("#rent-confirm").textContent = "Retry";
+  }
+});
+
+// ─── Orders ─────────────────────────────────────────────────────────────────
+async function refreshOrders() {
+  const btn = $("#btn-orders-refresh");
+  const out = $("#orders-content");
+  btn.disabled = true; btn.textContent = "Loading…";
+  out.className = "empty"; out.textContent = "Loading…";
+  try {
+    const include = $("#orders-completed").checked ? "true" : "false";
+    const r = await api("/api/orders?include_completed=" + include);
+    const orders = r.data || [];
+    if (!orders.length) { out.textContent = "No orders."; return; }
+    out.className = "";
+    out.innerHTML = `<table><thead><tr>
+      <th>Order ID</th><th>Server</th><th>Status</th><th>Expired</th>
+      <th>Hosts</th><th>Ports</th><th></th>
+    </tr></thead><tbody>` +
+      orders.map((o) => `
+        <tr>
+          <td class="mono">${o.id}</td>
+          <td class="mono">${o.renting_server ?? "—"}</td>
+          <td>${escapeHtml(o.status || "?")}</td>
+          <td>${o.expired ? "yes" : "no"}</td>
+          <td class="mono">${(o.pub_cluster || []).map(escapeHtml).join("<br>") || "—"}</td>
+          <td class="mono">${(o.tcp_ports || []).map(escapeHtml).join("<br>") || "—"}</td>
+          <td>${o.expired ? "" : `<button class="ghost" data-cancel="${o.id}">Cancel</button>`}</td>
+        </tr>`).join("") +
+      `</tbody></table>`;
+
+    out.querySelectorAll("button[data-cancel]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        if (!confirm(`Cancel order ${b.dataset.cancel}?`)) return;
+        b.disabled = true; b.textContent = "Cancelling…";
+        try {
+          await api("/api/orders/" + b.dataset.cancel, { method: "DELETE" });
+          refreshOrders();
+        } catch (e) {
+          alert("Failed: " + e.message);
+          b.disabled = false; b.textContent = "Cancel";
+        }
+      });
+    });
+  } catch (e) {
+    out.className = "empty";
+    out.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = "↻ Refresh orders";
+  }
+}
+$("#btn-orders-refresh").addEventListener("click", refreshOrders);
+
+// ─── Wallets ────────────────────────────────────────────────────────────────
+async function refreshWallets() {
+  const btn = $("#btn-wallets-refresh");
+  const out = $("#wallets-content");
+  btn.disabled = true; btn.textContent = "Loading…";
+  out.className = "empty"; out.textContent = "Loading…";
+  try {
+    const r = await api("/api/wallets");
+    const ws = r.data || [];
+    if (!ws.length) { out.textContent = "No wallets."; return; }
+    out.className = "";
+    out.innerHTML = `<table><thead><tr>
+      <th>Name</th><th>Balance</th><th>Deposit address</th>
+    </tr></thead><tbody>` +
+      ws.map((w) => `
+        <tr>
+          <td>${escapeHtml(w.name || "—")}</td>
+          <td class="num">${escapeHtml(String(w.balance ?? "—"))}</td>
+          <td class="mono">${escapeHtml(w.deposit || "—")}</td>
+        </tr>`).join("") +
+      `</tbody></table>`;
+  } catch (e) {
+    out.className = "empty";
+    out.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = "↻ Refresh wallets";
+  }
+}
+$("#btn-wallets-refresh").addEventListener("click", refreshWallets);
+
+// ─── Boot ───────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
