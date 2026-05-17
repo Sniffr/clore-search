@@ -156,6 +156,10 @@
       <input type="number" id="f-cuda" min="0" step="0.1" />
     </div>
     <div class="field">
+      <label>Min reliability %</label>
+      <input type="number" id="f-rel" min="0" max="100" step="1" value="0" />
+    </div>
+    <div class="field">
       <label>Currency</label>
       <select id="f-currency">
         <option value="">Any</option>
@@ -185,6 +189,7 @@
           <th class="sortable" data-sort="net_down">Down</th>
           <th class="sortable" data-sort="reliability">Rel</th>
           <th class="sortable" data-sort="net_cc">Loc</th>
+          <th class="sortable" data-sort="mrl" title="Max Rental Length — host's cap, in hours">MRL</th>
           <th class="sortable" data-sort="best_usd">Best $/day</th>
           <th class="sortable" data-sort="on_demand_usd">OD $</th>
           <th class="sortable" data-sort="spot_usd">Spot $</th>
@@ -247,6 +252,20 @@
       <div class="field" id="r-spot-field" style="display:none;">
         <label>Spot bid (native / day)</label>
         <input type="number" id="r-spot" step="0.0000001" />
+      </div>
+      <div class="field">
+        <label>Auto-cancel after <span class="dim" style="text-transform:none;">(blank = never)</span></label>
+        <div style="display:flex;gap:6px;">
+          <input type="number" id="r-duration" min="0" step="0.5" placeholder="e.g. 4" style="width:90px;" />
+          <select id="r-duration-unit" style="min-width:90px;">
+            <option value="hours">hours</option>
+            <option value="days">days</option>
+          </select>
+        </div>
+      </div>
+      <div class="field full">
+        <label>Estimated cost</label>
+        <div id="r-cost" class="dim" style="font-family: var(--mono); font-size: 12.5px; padding: 4px 0;">—</div>
       </div>
       <div class="field">
         <label>Docker image</label>
@@ -327,6 +346,7 @@ async function init() {
     $("#f-vram").value = state.defaults.min_vram;
     $("#f-bw").value = state.defaults.min_bandwidth;
     $("#f-cuda").value = state.defaults.min_cuda;
+    $("#f-rel").value = state.defaults.min_reliability ?? 0;
     if (!state.defaults.api_key_set) {
       $("#api-key-banner").classList.remove("row-hide");
     }
@@ -353,6 +373,7 @@ async function refreshSearch() {
     params.set("min_vram", $("#f-vram").value || "0");
     params.set("min_bandwidth", $("#f-bw").value || "0");
     params.set("min_cuda", $("#f-cuda").value || "0");
+    params.set("min_reliability", $("#f-rel").value || "0");
     const cur = $("#f-currency").value;
     if (cur) params.set("currency", cur);
     const q = $("#f-search").value.trim();
@@ -396,7 +417,7 @@ function sortAndRender() {
 
   const tbody = $("#server-rows");
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="14" class="empty">No matching servers.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="15" class="empty">No matching servers.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows.map((s) => {
@@ -421,6 +442,7 @@ function sortAndRender() {
       <td class="num">${Math.round(s.net_down)}</td>
       <td class="num">${rel}</td>
       <td class="mono">${escapeHtml(s.net_cc || "—")}</td>
+      <td class="num" title="Max Rental Length">${fmtMrl(s.mrl)}</td>
       <td class="num"><span class="best">$${(s.best_usd||0).toFixed(3)}</span> ${bestType} <span class="dim">${bestCurAbbr}</span></td>
       <td class="num">${fmt$(s.on_demand_usd)}</td>
       <td class="num">${fmt$(s.spot_usd)}</td>
@@ -444,6 +466,25 @@ function escapeHtml(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function escapeAttr(s) { return escapeHtml(s); }
+
+function fmtMrl(h) {
+  if (h == null || h === "N/A" || isNaN(parseFloat(h))) return '<span class="dim">—</span>';
+  const hours = parseFloat(h);
+  if (hours >= 48) return `${Math.round(hours/24)}d`;
+  return `${Math.round(hours)}h`;
+}
+
+function fmtCountdown(seconds) {
+  if (seconds == null) return "—";
+  if (seconds <= 0) return "due now";
+  const s = Math.floor(seconds);
+  const days = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (days > 0) return `${days}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
 
 $$("#server-table th.sortable").forEach((th) => {
   th.addEventListener("click", () => {
@@ -478,6 +519,9 @@ function openRentModal(srv) {
   $("#r-ssh").value = d.ssh_password || "";
   $("#r-entry").value = d.autossh_entrypoint || "";
   $("#r-command").value = d.command || "";
+  $("#r-duration").value = "";
+  $("#r-duration-unit").value = "hours";
+  updateCostEstimate();
 
   $("#rent-error").classList.add("row-hide");
   $("#rent-success").classList.add("row-hide");
@@ -500,6 +544,34 @@ $("#rent-scrim").addEventListener("click", (e) => {
 $("#r-type").addEventListener("change", () => {
   $("#r-spot-field").style.display = $("#r-type").value === "spot" ? "" : "none";
 });
+
+function autoCancelHoursFromUI() {
+  const v = parseFloat($("#r-duration").value);
+  if (!v || v <= 0) return null;
+  return $("#r-duration-unit").value === "days" ? v * 24 : v;
+}
+
+function updateCostEstimate() {
+  const srv = state.pendingServer;
+  const el = $("#r-cost");
+  if (!srv) { el.textContent = "—"; return; }
+  const hours = autoCancelHoursFromUI();
+  const usdPerDay = srv.best_usd || 0;
+  if (hours == null) {
+    el.innerHTML = `<span class="dim">Runs until manually cancelled · best price $${usdPerDay.toFixed(4)}/day</span>`;
+    return;
+  }
+  const cost = usdPerDay * (hours / 24);
+  const mrl = parseFloat(srv.mrl);
+  let warn = "";
+  if (!isNaN(mrl) && hours > mrl) {
+    warn = ` <span style="color:var(--warn);">⚠ exceeds host MRL of ${Math.round(mrl)}h</span>`;
+  }
+  el.innerHTML = `~ <strong>$${cost.toFixed(4)}</strong> for ${hours} hour(s) at $${usdPerDay.toFixed(4)}/day${warn}`;
+}
+
+$("#r-duration").addEventListener("input", updateCostEstimate);
+$("#r-duration-unit").addEventListener("change", updateCostEstimate);
 
 $("#rent-confirm").addEventListener("click", async () => {
   const srv = state.pendingServer;
@@ -531,6 +603,7 @@ $("#rent-confirm").addEventListener("click", async () => {
     ssh_password: $("#r-ssh").value || null,
     autossh_entrypoint: $("#r-entry").value || null,
     command: $("#r-command").value || null,
+    auto_cancel_hours: autoCancelHoursFromUI(),
   };
 
   try {
@@ -551,6 +624,7 @@ $("#rent-confirm").addEventListener("click", async () => {
       `Type:     ${d.order_type}\n` +
       `Currency: ${d.currency}\n` +
       (d.spot_price ? `Spot bid: ${d.spot_price}\n` : "") +
+      (d.scheduled_cancel_at ? `Auto-cancel at: ${d.scheduled_cancel_at}\n` : "") +
       `\nCheck the Orders tab for connection details.`;
     $("#rent-success").classList.remove("row-hide");
     $("#rent-confirm").textContent = "Done";
@@ -573,12 +647,26 @@ async function refreshOrders() {
     const r = await api("/api/orders?include_completed=" + include);
     const orders = r.data || [];
     if (!orders.length) { out.textContent = "No orders."; return; }
+    // Fetch scheduled cancels in parallel so we can show countdowns
+    let scheduledMap = {};
+    try {
+      const sr = await api("/api/scheduled-cancels");
+      for (const s of (sr.data || [])) scheduledMap[s.order_id] = s;
+    } catch (_) { /* non-fatal */ }
+
     out.className = "";
     out.innerHTML = `<table><thead><tr>
       <th>Order ID</th><th>Server</th><th>Status</th><th>Expired</th>
-      <th>Hosts</th><th>Ports</th><th></th>
+      <th>Hosts</th><th>Ports</th><th>Auto-cancel</th><th></th>
     </tr></thead><tbody>` +
-      orders.map((o) => `
+      orders.map((o) => {
+        const sched = scheduledMap[o.id];
+        const schedCell = sched
+          ? `<span class="pill spot">in ${fmtCountdown(sched.seconds_left)}</span>
+             <div class="dim" style="font-size:11px;">${escapeHtml(sched.cancel_at)}</div>
+             <button class="ghost" data-unsched="${o.id}" style="margin-top:4px;font-size:11px;">remove schedule</button>`
+          : '<span class="dim">—</span>';
+        return `
         <tr>
           <td class="mono">${o.id}</td>
           <td class="mono">${o.renting_server ?? "—"}</td>
@@ -586,8 +674,10 @@ async function refreshOrders() {
           <td>${o.expired ? "yes" : "no"}</td>
           <td class="mono">${(o.pub_cluster || []).map(escapeHtml).join("<br>") || "—"}</td>
           <td class="mono">${(o.tcp_ports || []).map(escapeHtml).join("<br>") || "—"}</td>
+          <td>${schedCell}</td>
           <td>${o.expired ? "" : `<button class="ghost" data-cancel="${o.id}">Cancel</button>`}</td>
-        </tr>`).join("") +
+        </tr>`;
+      }).join("") +
       `</tbody></table>`;
 
     out.querySelectorAll("button[data-cancel]").forEach((b) => {
@@ -600,6 +690,19 @@ async function refreshOrders() {
         } catch (e) {
           alert("Failed: " + e.message);
           b.disabled = false; b.textContent = "Cancel";
+        }
+      });
+    });
+    out.querySelectorAll("button[data-unsched]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        if (!confirm(`Remove auto-cancel schedule for order ${b.dataset.unsched}? (Order keeps running.)`)) return;
+        b.disabled = true; b.textContent = "…";
+        try {
+          await api("/api/scheduled-cancels/" + b.dataset.unsched, { method: "DELETE" });
+          refreshOrders();
+        } catch (e) {
+          alert("Failed: " + e.message);
+          b.disabled = false; b.textContent = "remove schedule";
         }
       });
     });
