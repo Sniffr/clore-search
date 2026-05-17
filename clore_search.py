@@ -244,15 +244,25 @@ class CloreClient:
 
 
 def extract_gpu_info(specs: dict) -> tuple:
-    """Extract GPU name and VRAM from server specs.
+    """Extract GPU name, VRAM (per card) and count from server specs.
 
-    Returns (gpu_name, vram_gb).
+    Returns (gpu_name, vram_gb, gpu_count).
+    Clore reports gpu strings like "4x NVIDIA GeForce RTX 4090"; we parse the
+    leading "Nx" to get the card count and default to 1 if absent.
     """
+    import re
     gpu_raw = specs.get("gpu", "Unknown GPU")
     gpuram = specs.get("gpuram", 0)
 
     clean = gpu_raw.strip()
-    return clean, gpuram
+    count = 1
+    m = re.match(r"\s*(\d+)\s*x\s+", clean, re.IGNORECASE)
+    if m:
+        try:
+            count = max(1, int(m.group(1)))
+        except ValueError:
+            count = 1
+    return clean, gpuram, count
 
 
 def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = None,
@@ -274,7 +284,7 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
 
     for server in servers:
         specs = server.get("specs", {})
-        gpu_name, gpuram = extract_gpu_info(specs)
+        gpu_name, gpuram, gpu_count = extract_gpu_info(specs)
 
         if gpuram <= min_vram_gb:
             continue
@@ -352,10 +362,16 @@ def filter_gpu_servers(servers: list, min_vram_gb: int = 20, currency: str = Non
 
         cc = net.get("cc", "N/A")  # country code
 
+        total_vram = gpuram * gpu_count
+        usd_per_vram_gb = (best_usd / total_vram) if (best_usd > 0 and total_vram > 0) else None
+
         results.append({
             "id": server.get("id"),
             "gpu": gpu_name,
+            "gpu_count": gpu_count,
             "vram": gpuram,
+            "total_vram": total_vram,
+            "usd_per_vram_gb": usd_per_vram_gb,
             "cuda_version": cuda_ver,
             "on_demand_usd": od_usd,
             "spot_usd": spot_usd,

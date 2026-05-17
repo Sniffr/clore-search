@@ -183,7 +183,9 @@
         <tr>
           <th class="sortable" data-sort="id">ID</th>
           <th class="sortable" data-sort="gpu">GPU</th>
-          <th class="sortable" data-sort="vram">VRAM</th>
+          <th class="sortable" data-sort="gpu_count" title="GPU count">#</th>
+          <th class="sortable" data-sort="vram" title="VRAM per card">VRAM</th>
+          <th class="sortable" data-sort="total_vram" title="GPUs × VRAM per card">Total VRAM</th>
           <th class="sortable" data-sort="cuda_version">CUDA</th>
           <th class="sortable" data-sort="net_up">Up</th>
           <th class="sortable" data-sort="net_down">Down</th>
@@ -191,6 +193,7 @@
           <th class="sortable" data-sort="net_cc">Loc</th>
           <th class="sortable" data-sort="mrl" title="Max Rental Length — host's cap, in hours">MRL</th>
           <th class="sortable" data-sort="best_usd">Best $/day</th>
+          <th class="sortable" data-sort="usd_per_vram_gb" title="Best $/day ÷ total VRAM — lower is a better deal">$/VRAM·day</th>
           <th class="sortable" data-sort="on_demand_usd">OD $</th>
           <th class="sortable" data-sort="spot_usd">Spot $</th>
           <th class="sortable" data-sort="on_demand_btc">OD BTC</th>
@@ -417,7 +420,7 @@ function sortAndRender() {
 
   const tbody = $("#server-rows");
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="15" class="empty">No matching servers.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="17" class="empty">No matching servers.</td></tr>`;
     return;
   }
   tbody.innerHTML = rows.map((s) => {
@@ -433,10 +436,17 @@ function sortAndRender() {
       if (v >= 0.00001) return v.toFixed(7);
       return v.toFixed(8);
     };
+    const totalVram = s.total_vram != null ? s.total_vram : (s.vram * (s.gpu_count || 1));
+    const perVram = s.usd_per_vram_gb;
+    const perVramCell = perVram != null && perVram > 0
+      ? `$${perVram.toFixed(4)}`
+      : '<span class="dim">—</span>';
     return `<tr>
       <td class="mono">${s.id}</td>
       <td title="${escapeAttr(s.gpu)}">${escapeHtml(s.gpu)}</td>
+      <td class="num">${s.gpu_count || 1}</td>
       <td class="num">${s.vram}GB</td>
+      <td class="num"><strong>${totalVram}GB</strong></td>
       <td class="num">${s.cuda_version ? s.cuda_version.toFixed(1) : "—"}</td>
       <td class="num">${Math.round(s.net_up)}</td>
       <td class="num">${Math.round(s.net_down)}</td>
@@ -444,6 +454,7 @@ function sortAndRender() {
       <td class="mono">${escapeHtml(s.net_cc || "—")}</td>
       <td class="num" title="Max Rental Length">${fmtMrl(s.mrl)}</td>
       <td class="num"><span class="best">$${(s.best_usd||0).toFixed(3)}</span> ${bestType} <span class="dim">${bestCurAbbr}</span></td>
+      <td class="num" title="Best $/day ÷ total VRAM (lower = better deal)">${perVramCell}</td>
       <td class="num">${fmt$(s.on_demand_usd)}</td>
       <td class="num">${fmt$(s.spot_usd)}</td>
       <td class="num">${fmtBtc(s.on_demand_btc)}</td>
