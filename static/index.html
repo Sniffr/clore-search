@@ -120,6 +120,19 @@
 
   .small-actions { display: flex; gap: 6px; }
   .small-actions button { padding: 4px 8px; font-size: 12px; }
+
+  .pill.expired { background: rgba(239,68,68,.15); color: var(--bad); border-color: rgba(239,68,68,.3); }
+  .pill.active { background: rgba(74,222,128,.15); color: var(--good); border-color: rgba(74,222,128,.3); }
+
+  .action-btn {
+    padding: 3px 8px; font-size: 11px; border-radius: 4px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--muted);
+  }
+  .action-btn:hover { color: var(--text); border-color: var(--accent); }
+  .action-btn.snipe { color: var(--warn); border-color: rgba(251,191,36,.4); }
+  .action-btn.snipe:hover { background: rgba(251,191,36,.12); }
+  .action-btn.reorder { color: var(--accent); border-color: rgba(78,161,255,.4); }
+  .action-btn.reorder:hover { background: rgba(78,161,255,.12); }
 </style>
 </head>
 <body>
@@ -497,6 +510,15 @@ function fmtCountdown(seconds) {
   return `${m}m`;
 }
 
+function fmtTime(iso) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' ' +
+           d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  } catch (_) { return iso; }
+}
+
 $$("#server-table th.sortable").forEach((th) => {
   th.addEventListener("click", () => {
     const key = th.dataset.sort;
@@ -667,8 +689,8 @@ async function refreshOrders() {
 
     out.className = "";
     out.innerHTML = `<table><thead><tr>
-      <th>Order ID</th><th>Server</th><th>Status</th><th>Expired</th>
-      <th>Hosts</th><th>Ports</th><th>Auto-cancel</th><th></th>
+      <th>Order ID</th><th>Server</th><th>Type</th><th>Currency</th><th>Status</th><th>Expired</th>
+      <th>Hosts</th><th>Ports</th><th>Auto-cancel</th><th>Auto-reorder</th><th></th>
     </tr></thead><tbody>` +
       orders.map((o) => {
         const sched = scheduledMap[o.id];
@@ -677,16 +699,43 @@ async function refreshOrders() {
              <div class="dim" style="font-size:11px;">${escapeHtml(sched.cancel_at)}</div>
              <button class="ghost" data-unsched="${o.id}" style="margin-top:4px;font-size:11px;">remove schedule</button>`
           : '<span class="dim">—</span>';
+        const reorderCell = o.auto_reorder_at
+          ? `<span class="pill reorder" style="background:rgba(78,161,255,.15);color:var(--accent);border-color:rgba(78,161,255,.3);">at ${fmtTime(o.auto_reorder_at)}</span>
+             <button class="ghost" data-unreorder="${o.id}" style="margin-top:4px;font-size:11px;">remove</button>`
+          : '<span class="dim">—</span>';
+        const expiredPill = o.expired
+          ? '<span class="pill expired">expired</span>'
+          : '<span class="pill active">active</span>';
+        const typeCell = escapeHtml(o.type || "—");
+        const currencyCell = escapeHtml(o.currency || "—");
+        const actions = [];
+        // Auto-reorder: only for active orders without a pending auto-reorder
+        if (!o.expired && !o.auto_reorder_at) {
+          actions.push(`<button class="action-btn auto-reorder-btn" data-auto-reorder="${o.id}" data-mrl="${o.mrl ?? ''}" title="Auto-reorder when this order expires">⏱ Auto-Reorder</button>`);
+        }
+        // Snipe: available for expired orders
+        if (o.expired) {
+          actions.push(`<button class="action-btn snipe" data-snipe="${o.id}" title="Snipe — reorder this expired order with a 5-min probe window">⚡ Snipe</button>`);
+        }
+        // Reorder: available for any order
+        actions.push(`<button class="action-btn reorder" data-reorder="${o.id}" title="Reorder — create a new order with the same config">↻ Reorder</button>`);
+        // Cancel: only for non-expired
+        if (!o.expired) {
+          actions.push(`<button class="action-btn" data-cancel="${o.id}">Cancel</button>`);
+        }
         return `
         <tr>
           <td class="mono">${o.id}</td>
           <td class="mono">${o.renting_server ?? "—"}</td>
+          <td>${typeCell}</td>
+          <td>${currencyCell}</td>
           <td>${escapeHtml(o.status || "?")}</td>
-          <td>${o.expired ? "yes" : "no"}</td>
+          <td>${expiredPill}</td>
           <td class="mono">${(o.pub_cluster || []).map(escapeHtml).join("<br>") || "—"}</td>
           <td class="mono">${(o.tcp_ports || []).map(escapeHtml).join("<br>") || "—"}</td>
           <td>${schedCell}</td>
-          <td>${o.expired ? "" : `<button class="ghost" data-cancel="${o.id}">Cancel</button>`}</td>
+          <td>${reorderCell}</td>
+          <td><div class="small-actions">${actions.join("")}</div></td>
         </tr>`;
       }).join("") +
       `</tbody></table>`;
@@ -714,6 +763,120 @@ async function refreshOrders() {
         } catch (e) {
           alert("Failed: " + e.message);
           b.disabled = false; b.textContent = "remove schedule";
+        }
+      });
+    });
+
+    // Snipe button — reorder an expired order with a 5-min probe window
+    out.querySelectorAll("button[data-snipe]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        const oid = b.dataset.snipe;
+        if (!confirm(`⚡ Snipe order #${oid}?\n\nThis will immediately reorder the same server with the same currency.\nA 5-minute auto-cancel is scheduled so you can verify the server.`)) return;
+        b.disabled = true; b.textContent = "Sniping…";
+        try {
+          const res = await fetch(`/api/orders/${oid}/snipe`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ auto_cancel_minutes: 5 }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+          }
+          const d = data.data;
+          const expiredNote = d.was_expired ? " (was expired)" : "";
+          const probeNote = d.snipe_probe_minutes ? ` · auto-cancels in ~${d.snipe_probe_minutes} min` : "";
+          alert(
+            `✅ Sniped! Order #${d.order?.id ?? "n/a"} created${expiredNote}${probeNote}\n` +
+            `Server: ${d.order?.renting_server ?? "?"} · ${d.order_type} / ${d.currency}`
+          );
+          refreshOrders();
+        } catch (e) {
+          alert("Snipe failed: " + e.message);
+          b.disabled = false; b.textContent = "⚡ Snipe";
+        }
+      });
+    });
+
+    // Reorder button — reorder any order with no auto-cancel
+    out.querySelectorAll("button[data-reorder]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        const oid = b.dataset.reorder;
+        if (!confirm(`↻ Reorder #${oid}?\n\nThis will create a new order with the same server, currency, and settings.`)) return;
+        b.disabled = true; b.textContent = "Reordering…";
+        try {
+          const res = await fetch(`/api/orders/${oid}/reorder`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+          }
+          const d = data.data;
+          alert(
+            `✅ Reordered! Order #${d.order?.id ?? "n/a"} created\n` +
+            `Server: ${d.order?.renting_server ?? "?"} · ${d.order_type} / ${d.currency}`
+          );
+          refreshOrders();
+        } catch (e) {
+          alert("Reorder failed: " + e.message);
+          b.disabled = false; b.textContent = "↻ Reorder";
+        }
+      });
+    });
+
+    // Auto-Reorder button — schedule reorder at expiry
+    out.querySelectorAll("button[data-auto-reorder]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        const oid = b.dataset.auto_reorder;
+        const mrl = b.dataset.mrl;
+        let defaultHours = "";
+        if (mrl && mrl !== "N/A" && !isNaN(parseFloat(mrl))) {
+          defaultHours = parseFloat(mrl).toString();
+        }
+        const input = prompt(
+          `⏱ Auto-Reorder order #${oid}\n\nHours until expiry (reorder will fire at that time):`,
+          defaultHours || ""
+        );
+        if (input === null) return; // cancelled
+        const hours = parseFloat(input);
+        if (!hours || hours <= 0) {
+          alert("Invalid hours — must be a positive number.");
+          return;
+        }
+        b.disabled = true; b.textContent = "Setting…";
+        try {
+          const res = await fetch(`/api/orders/${oid}/auto-reorder`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ expires_in_hours: hours }),
+          });
+          const data = await res.json();
+          if (!res.ok || !data.ok) {
+            throw new Error(data.error || data.detail || `HTTP ${res.status}`);
+          }
+          alert(`✅ Auto-reorder set for order #${oid}\nWill reorder at: ${data.data.reorder_at}`);
+          refreshOrders();
+        } catch (e) {
+          alert("Failed: " + e.message);
+          b.disabled = false; b.textContent = "⏱ Auto-Reorder";
+        }
+      });
+    });
+
+    // Remove auto-reorder button
+    out.querySelectorAll("button[data-unreorder]").forEach((b) => {
+      b.addEventListener("click", async () => {
+        if (!confirm(`Remove auto-reorder schedule for order ${b.dataset.unreorder}? (Order keeps running.)`)) return;
+        b.disabled = true; b.textContent = "…";
+        try {
+          await api("/api/auto-reorders/" + b.dataset.unreorder, { method: "DELETE" });
+          refreshOrders();
+        } catch (e) {
+          alert("Failed: " + e.message);
+          b.disabled = false; b.textContent = "remove";
         }
       });
     });
